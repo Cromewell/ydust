@@ -1,0 +1,200 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+@utility icon-btn {
+  @apply flex size-8 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-40 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100;
+}
+
+@utility send-btn {
+  @apply flex size-9 shrink-0 items-center justify-center rounded-xl text-white shadow-sm transition disabled:bg-zinc-300 disabled:shadow-none dark:disabled:bg-zinc-700;
+}
+
+/* Floating menus */
+@keyframes pop {
+  from {
+    opacity: 0;
+    scale: 0.96;
+  }
+}
+.animate-pop {
+  animation: pop 120ms ease-out;
+}
+
+/* Small tooltips (e.g. which model answered). Plain :hover on purpose: Tailwind's hover:
+   variants only apply on devices that report a mouse; :focus covers tapping. */
+.tip-host .tip {
+  opacity: 0;
+  translate: 0 4px;
+  transition:
+    opacity 120ms ease-out,
+    translate 120ms ease-out;
+}
+.tip-host:hover .tip,
+.tip-host:focus .tip {
+  opacity: 1;
+  translate: 0 0;
+}
+
+/* A passage briefly lighting up after jumping to it. */
+.flash-bar {
+  animation: flash-bar 1.8s ease-out forwards;
+}
+@keyframes flash-bar {
+  0%,
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Streaming caret + shimmering status */
+.caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-top: 0.25rem;
+  border-radius: 2px;
+  background: var(--color-violet-500);
+  animation: blink 1s steps(2) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+.shimmer {
+  background: linear-gradient(90deg, currentColor 30%, var(--color-violet-400) 50%, currentColor 70%) 0 0 / 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  background-color: var(--color-zinc-500);
+  animation: shimmer 1.6s linear infinite;
+}
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* ---- pdf.js text layer (trimmed from pdfjs-dist/web/pdf_viewer.css) ---- */
+.textLayer {
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+.textLayer > :not(.markedContent),
+.textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+/* Pages with a /Rotate entry: pdf.js sets data-main-rotation on the layer. */
+.textLayer[data-main-rotation="90"] {
+  transform: rotate(90deg) translateY(-100%);
+}
+.textLayer[data-main-rotation="180"] {
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+.textLayer[data-main-rotation="270"] {
+  transform: rotate(270deg) translateX(-100%);
+}
+.textLayer .markedContent {
+  display: contents;
+}
+.textLayer span[role="img"] {
+  user-select: none;
+  cursor: default;
+}
+/* The native highlight is a patchwork over pdf.js' per-word spans; we draw clean
+   per-line bars ourselves (PdfViewer → selectionHighlights), so hide it. */
+.textLayer ::selection {
+  background: transparent;
+}
+.textLayer br::selection {
+  background: transparent;
+}
+
+/* Sliders in the page colour menu: the track shows the scale (set via --track). */
+.appearance-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  background: transparent;
+}
+.appearance-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--track);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.12);
+}
+.appearance-slider::-moz-range-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--track);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.12);
+}
+.appearance-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  margin-top: -5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px solid var(--color-violet-500);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
+}
+.appearance-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px solid var(--color-violet-500);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
+}
+.appearance-slider:focus-visible {
+  outline: 2px solid var(--color-violet-400);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

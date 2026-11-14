@@ -1,0 +1,71 @@
+import "katex/dist/katex.min.css";
+import { memo, type ReactNode } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import { SIZE_CLASSES, type TextSize } from "../lib/settings";
+
+/** Plain text of a rendered link label. */
+const textOf = (node: ReactNode): string =>
+  typeof node === "string" || typeof node === "number"
+    ? String(node)
+    : Array.isArray(node)
+      ? node.map(textOf).join("")
+      : node && typeof node === "object" && "props" in node
+        ? textOf((node.props as { children?: ReactNode }).children)
+        : "";
+
+/** LaTeX delimiters \( \) and \[ \] → $ / $$ so remark-math understands them. */
+function normalizeMath(src: string) {
+  return src
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `$$${m}$$`)
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`);
+}
+
+export const Markdown = memo(function Markdown({
+  children,
+  onJump,
+  hasDoc,
+  size = "s",
+}: {
+  children: string;
+  /** `doc`: the alias of another document ("[Script, p. 3](#doc=d2&page=3)"); `label`: the link text. */
+  onJump: (page: number, doc?: string, label?: string) => void;
+  /** Whether a document alias exists (links to unknown documents render as text). */
+  hasDoc?: (alias: string) => boolean;
+  size?: TextSize;
+}) {
+  const components: Components = {
+    a({ href, children }) {
+      const link = href?.match(/^#(?:doc=([\w-]+)&)?page=(\d+)$/);
+      if (link && (!link[1] || hasDoc?.(link[1]))) {
+        const [, doc, page] = link;
+        return (
+          <button
+            type="button"
+            onClick={() => onJump(Number(page), doc, textOf(children))}
+            className="mx-0.5 inline-flex items-center rounded-md bg-violet-100 px-1.5 py-px align-baseline text-[0.85em] font-medium text-violet-700 no-underline transition hover:bg-violet-200 dark:bg-violet-500/15 dark:text-violet-300 dark:hover:bg-violet-500/25"
+          >
+            {children}
+          </button>
+        );
+      }
+      // Local file links (and anything the URL sanitizer stripped) render as plain text.
+      if (!href || !/^https?:\/\//.test(href)) return <span>{children}</span>;
+      return (
+        <a href={href} target="_blank" rel="noreferrer noopener">
+          {children}
+        </a>
+      );
+    },
+  };
+
+  return (
+    <div className={`prose ${SIZE_CLASSES[size].prose} prose-zinc dark:prose-invert max-w-none prose-p:leading-relaxed prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-headings:font-semibold`}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={components}>
+        {normalizeMath(children)}
+      </ReactMarkdown>
+    </div>
+  );
+});

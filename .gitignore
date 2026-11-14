@@ -1,0 +1,17 @@
+node_modules/
+dist/
+library/
+*.tmp
+*.log
+.DS_Store
+
+# Local secrets / environment
+.env
+.env.*
+
+# Local AI tooling: Claude Code's personal settings, agent instructions for my own
+# setup (zwilling MCP), and the logs of the Gemini second-opinion tool
+.claude/settings.local.json
+AGENTS.md
+CLAUDE.md
+docs/ai/GEMINI_LOG.md

@@ -1,0 +1,261 @@
+import type { Message, Quote } from "./store.ts";
+
+const MAX_QUOTE = 8_000;
+const MAX_PAGE = 12_000;
+
+/** Answer languages the UI offers (code → name the model understands). */
+export const LANGUAGES: Record<string, string> = {
+  en: "English",
+  de: "German (Deutsch)",
+  fr: "French (Français)",
+  es: "Spanish (Español)",
+  it: "Italian (Italiano)",
+  pt: "Portuguese (Português)",
+  nl: "Dutch (Nederlands)",
+  pl: "Polish (Polski)",
+  tr: "Turkish (Türkçe)",
+  ru: "Russian (Русский)",
+  uk: "Ukrainian (Українська)",
+  ar: "Arabic (العربية)",
+  zh: "Simplified Chinese (简体中文)",
+  ja: "Japanese (日本語)",
+  ko: "Korean (한국어)",
+};
+
+/** Explanation levels the UI offers. */
+export const LEVELS: Record<string, string> = {
+  beginner:
+    "Explain for a beginner: avoid jargon or define every technical term, build intuition with simple examples, and go step by step.",
+  intermediate: "Explain for a student with the usual background for this text: clear, complete, not oversimplified.",
+  advanced: "Assume solid background knowledge: be precise and rigorous, use proper terminology, and skip the basics.",
+  exam: "I'm preparing for an exam: focus on what is likely to be asked (definitions, key theorems or arguments, typical pitfalls) and end with one or two short practice questions.",
+};
+
+
+const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + " […]" : s);
+
+const MAX_OUTLINE_LINES = 60;
+const MAX_OUTLINE_CHARS = 4_000;
+
+/** A document as the agent gets to know it. */
+export type DocRef = {
+  id: string;
+  /** Short id used in citations ("d7"). */
+  alias: string;
+  name: string;
+  pages: number | null;
+  hasText: boolean | null;
+  textFile: string;
+  /** outline.txt, if the document has one. */
+  outlineFile: string | null;
+  /** Its content (only needed where the outline is shown inline). */
+  outline?: string | null;
+};
+
+/** What the chat is about: one PDF (maybe inside a folder), or a whole folder. */
+export type Scope =
+  | { kind: "doc"; doc: DocRef; folder: { name: string; others: DocRef[] } | null }
+  | { kind: "folder"; name: string; docs: DocRef[] };
+
+/** Changes whenever the documents the agent should know about change (→ tell it again). */
+export function scopeSignature(scope: Scope) {
+  const docs = scope.kind === "doc" ? (scope.folder?.others ?? []) : scope.docs;
+  const name = scope.kind === "doc" ? (scope.folder?.name ?? "") : scope.name;
+  return JSON.stringify([name, docs.map((d) => [d.alias, d.name, d.pages, d.hasText, !!d.outlineFile])]);
+}
+
+function outlineExcerpt(d: DocRef) {
+  if (!d.outline?.trim()) return null;
+  const lines = d.outline.trim().split("\n");
+  let out = lines.slice(0, MAX_OUTLINE_LINES).join("\n");
+  if (out.length > MAX_OUTLINE_CHARS) out = out.slice(0, MAX_OUTLINE_CHARS).replace(/\n[^\n]*$/, "");
+  const shown = out.split("\n").length;
+  return shown < lines.length ? `${out}\n… (${lines.length - shown} more lines in ${d.outlineFile})` : out;
+}
+
+/** One entry of a document list ("manifest") for the agent. */
+function describeDoc(d: DocRef, withOutline: boolean) {
+  const head = `- [${d.alias}] "${d.name}"${d.pages ? ` (${d.pages} pages)` : ""}`;
+  if (!d.hasText) return `${head}\n  No text could be extracted (probably scanned): you can't read it.`;
+  const lines = [head, `  Text: ${d.textFile}`];
+  if (d.outlineFile) {
+    const excerpt = withOutline ? outlineExcerpt(d) : null;
+    lines.push(excerpt ? `  Outline (page: heading):\n${excerpt.replace(/^/gm, "    ")}` : `  Outline: ${d.outlineFile}`);
+  }
+  return lines.join("\n");
+}
+
+const TOOLS_RULE =
+  `- You have two document tools: \`search\` (forgiving full-text search over the documents: accents, ß/ss, case and hyphenation don't matter; returns pages with excerpts) ` +
+  `and \`read_pages\` (the exact text of a page range; page numbers are the PDF's). Use \`search\` to find where something is discussed and \`read_pages\` to read those pages, ` +
+  `instead of opening the large text files. Search for short terms (one or two words), and try synonyms or other word forms if nothing is found.`;
+
+const citeOther = `[<short document name>, p. N](#doc=<id>&page=N), using the id in square brackets from the document list (e.g. [Script, p. 12](#doc=d3&page=12))`;
+
+/** The folder's documents, as told on the first turn or after the folder changed. */
+function folderContext(scope: Scope) {
+  if (scope.kind === "folder") {
+    return (
+      `The documents in my folder "${scope.name}":\n` +
+      (scope.docs.length ? scope.docs.map((d) => describeDoc(d, true)).join("\n") : "(none yet)")
+    );
+  }
+  if (!scope.folder || !scope.folder.others.length) return null;
+  return (
+    `This PDF is in my folder "${scope.folder.name}" together with these documents:\n` +
+    scope.folder.others.map((d) => describeDoc(d, false)).join("\n")
+  );
+}
+
+export function buildPrompt(opts: {
+  scope: Scope;
+  question: string;
+  quote?: Quote;
+  /** The document the quote is from (folder chats). */
+  quoteDoc?: DocRef | null;
+  pageText?: string | null;
+  /** Absolute paths of images attached to this question. */
+  images?: string[];
+  /** Language code from LANGUAGES, or anything else for "same as my question". */
+  language?: string;
+  firstTurn: boolean;
+  /** The folder changed since this session last heard about it. */
+  contextChanged?: boolean;
+  /** ydust's search/read_pages tools are available in this turn. */
+  tools?: boolean;
+  /** …and this (resumed) session doesn't know them yet. */
+  toolsIntro?: boolean;
+  /** Messages of this chat this assistant hasn't seen yet (answered by the other one). */
+  history?: Message[];
+  /** Document names by id, for quotes in the history. */
+  docNames?: Map<string, string>;
+  /** Key of LEVELS, or anything else for no explicit level. */
+  level?: string;
+  /** "check": the question is my own explanation, to be checked. */
+  mode?: "check";
+  /** Second opinion: the other assistant's answer to this same question. */
+  otherAnswer?: { by: string; content: string };
+}) {
+  const { scope, question, quote, quoteDoc, pageText, images = [], language, firstTurn, contextChanged, tools, toolsIntro, history = [], docNames, level, mode, otherAnswer } = opts;
+  const parts: string[] = [];
+  const isFolder = scope.kind === "folder";
+
+  if (firstTurn) {
+    const intro: string[] = [];
+    if (scope.kind === "doc") {
+      const d = scope.doc;
+      intro.push(`You are a patient, precise study tutor. I am studying the PDF "${d.name}"${d.pages ? ` (${d.pages} pages)` : ""}.`);
+      intro.push(
+        d.hasText
+          ? `Its full extracted text is in ${d.textFile}; each page starts with a line "=== Page N ===".` +
+              (d.outlineFile ? ` Its outline (headings with page numbers) is in ${d.outlineFile}.` : "")
+          : `Its text could not be extracted (it is probably a scanned document), so you only know what I quote.`,
+      );
+    } else {
+      intro.push(
+        `You are a patient, precise study tutor. I am studying the documents of my folder "${scope.name}" together (e.g. lecture notes, slides, exercises of one course). ` +
+          `Treat them as one body of material: connect them, and say which document something comes from.`,
+      );
+    }
+    const ctx = folderContext(scope);
+    if (ctx) intro.push("", ctx);
+
+    const anyText = scope.kind === "doc" ? scope.doc.hasText || !!scope.folder?.others.some((d) => d.hasText) : scope.docs.some((d) => d.hasText);
+    const rules = [
+      `- Never run shell commands and never create or edit files.`,
+      scope.kind === "doc"
+        ? scope.doc.hasText
+          ? tools
+            ? `- If you need more context than I give you, look it up with the document tools below (the outline helps you find the right pages). Read only the pages you need.`
+            : `- If you need more context than I give you, read ${scope.doc.textFile} with your file-reading tool (read only the parts you need; the outline helps you find them).`
+          : `- Do not open any files except images I attach${scope.folder?.others.length ? " and the other documents of the folder" : ""}.`
+        : tools
+          ? `- To answer, first find the documents and pages that matter (the outlines and \`search\` help), then read just those pages with \`read_pages\`. Don't read whole documents when a few pages will do.`
+          : `- To answer, first use the outlines to find the documents and pages that matter, then read just those parts of their text files with your file-reading tool. Don't read whole files when a few pages will do.`,
+      ...(scope.kind === "doc" && scope.folder?.others.length
+        ? [`- Focus on this PDF. Only read the other documents of the folder when my question needs them (or I ask you to); their outlines help you find the right pages.`]
+        : []),
+      ...(anyText ? [] : [`- No document has extractable text: rely on what I quote and on the images I attach.`]),
+      ...(tools ? [TOOLS_RULE] : []),
+      `- When I attach images (snapshots of a PDF or pasted pictures), open each one with your file-reading tool and look at it before answering.`,
+      `- Answer in Markdown. Write math as LaTeX with $...$ (inline) or $$...$$ (display).`,
+      isFolder
+        ? `- When you refer to a place in a document, cite it as a Markdown link of the exact form ${citeOther}.`
+        : `- When you refer to a place in this PDF, cite it as a Markdown link of the exact form [p. N](#page=N).` +
+          (scope.folder?.others.length ? ` For the other documents of the folder use ${citeOther}.` : ""),
+      `- Never link to local files or paths.`,
+      `- Be clear and concise; prefer explanations, small examples and intuition over repeating the text.`,
+      `- Reply in the answer language I name with each message.`,
+    ];
+    parts.push([...intro, ``, `Rules for the whole conversation:`, ...rules].join("\n"));
+  }
+  if (!firstTurn && toolsIntro) parts.push(`Note: you now have two tools for the documents.\n${TOOLS_RULE.slice(2)}`);
+  if (!firstTurn && contextChanged) {
+    const ctx = folderContext(scope);
+    parts.push(
+      ctx
+        ? `Note: the documents in the folder changed since we last talked. ${ctx}\n` +
+            (isFolder ? `Cite them as ${citeOther}.` : `Cite the other documents as ${citeOther}.`)
+        : `Note: this PDF is no longer in a folder. Only use this PDF from now on.`,
+    );
+  }
+
+  const earlier = history.filter((m) => !m.error && m.content.trim()).slice(-12);
+  if (earlier.length) {
+    const about = isFolder ? "these documents" : "this document";
+    parts.push(
+      (firstTurn
+        ? `We already talked about ${about} (with another assistant). The conversation so far, for context:`
+        : `Since your last answer, I also talked with another assistant about ${about}:`) +
+        `\n<conversation>\n` +
+        earlier
+          .map((m) => {
+            const who = m.role === "user" ? "Me" : "Assistant";
+            const where = m.quote?.doc && isFolder ? ` of "${docNames?.get(m.quote.doc) ?? "a document"}"` : "";
+            const q = m.quote ? ` [about this passage on p. ${m.quote.page}${where}: "${clip(m.quote.text, 300)}"]` : "";
+            return `${who}${q}: ${clip(m.content, 1500)}`;
+          })
+          .join("\n\n") +
+        `\n</conversation>`,
+    );
+  }
+
+  if (quote) {
+    const where = isFolder && quoteDoc ? ` of [${quoteDoc.alias}] "${quoteDoc.name}"` : "";
+    parts.push(`I selected this passage on page ${quote.page}${where}:\n<selection>\n${clip(quote.text, MAX_QUOTE)}\n</selection>`);
+    if (pageText) parts.push(`Full text of that page for context:\n<page n="${quote.page}">\n${clip(pageText, MAX_PAGE)}\n</page>`);
+  }
+
+  if (images.length) {
+    parts.push(
+      `I attached ${images.length === 1 ? "an image" : `${images.length} images`}. Look at ${images.length === 1 ? "it" : "each of them"} with your file-reading tool:\n` +
+        images.map((p, i) => `${i + 1}. ${p}`).join("\n"),
+    );
+  }
+
+  const lang = language ? LANGUAGES[language] : undefined;
+  parts.push(
+    lang
+      ? `Answer language: ${lang} (answer in it even if my question or the document is in another language).`
+      : `Answer language: the language of my question.`,
+  );
+  if (level && LEVELS[level]) parts.push(`Explanation level: ${LEVELS[level]}`);
+
+  if (otherAnswer) {
+    parts.push(
+      `Another AI assistant (${otherAnswer.by}) already answered the question below:\n<other_answer>\n${clip(otherAnswer.content, 12_000)}\n</other_answer>\n` +
+        `Give me a second opinion: answer the question yourself, and check the other answer critically — say clearly where you agree, where you disagree or see mistakes, and what it missed. Be concise.`,
+    );
+  }
+
+  if (mode === "check") {
+    parts.push(
+      `I'm explaining ${quote ? "this passage" : "this"} in my own words to test my understanding. Check my explanation: say what is correct, what is wrong or imprecise, and what is missing. ` +
+        `Don't just give me the complete explanation — guide me with hints, and end with one question that helps me close the biggest gap.`,
+    );
+    parts.push(`My explanation: ${question}`);
+  } else {
+    parts.push(`My question: ${question}`);
+  }
+  return parts.join("\n\n");
+}
