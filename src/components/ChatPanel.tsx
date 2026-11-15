@@ -11,21 +11,23 @@ import {
   GraduationCap,
   Loader2,
   MessageSquarePlus,
+  NotebookPen,
   Pin,
   PinOff,
   Quote as QuoteIcon,
   Square,
-  StickyNote,
   TriangleAlert,
   X,
 } from "lucide-react";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { api, type Chat, type Message, type ProviderInfo, type Quote, type ToolEvent } from "../lib/api";
+import { api, type Chat, type Message, type NoteOwner, type ProviderInfo, type Quote, type ToolEvent } from "../lib/api";
 import { chatMarkdown, downloadText, notesMarkdown, questionOf, safeFilename } from "../lib/export";
 import { SIZE_CLASSES, type TextSize } from "../lib/settings";
 import { ChatSettings } from "./ChatSettings";
 import { Markdown } from "./Markdown";
 import { ModelPicker } from "./ModelPicker";
+import type { Anchor } from "./NotePicker";
+import { NotesPanel, type OpenNote } from "./NotesPanel";
 import { PROVIDER_ICON, ProviderSwitch } from "./ProviderSwitch";
 
 export type Streaming = { text: string; tools: ToolEvent[] };
@@ -34,6 +36,9 @@ export type Streaming = { text: string; tools: ToolEvent[] };
 export type Attachment = { key: string; blob: Blob; url: string; label: string };
 
 export type ChatPanelHandle = { focus: () => void; showMessage: (id: string) => void };
+
+/** Chat, the note files, and pinned answers. */
+export type PanelTab = "chat" | "notes" | "pinned";
 
 type Props = {
   chat: Chat;
@@ -76,6 +81,15 @@ type Props = {
   onSecondOpinion: (messageId: string, providerId: string) => void;
   onPin: (messageId: string, pinned: boolean) => void;
   onNote: (messageId: string, note: string) => void;
+  tab: PanelTab;
+  onTab: (tab: PanelTab) => void;
+  /** Whose notes the Notes tab shows: the open PDF, then its folder. */
+  noteOwners: NoteOwner[];
+  openNote: OpenNote | null;
+  onOpenNote: (note: OpenNote | null) => void;
+  notesRefresh: number;
+  /** Choose a note to put this answer into (the picker opens at `at`). */
+  onInsertAnswer: (messageId: string, at: Anchor) => void;
 };
 
 /**
@@ -141,11 +155,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
     onLevel,
     checkMode,
     onCheckMode,
+    tab,
+    onTab: setTab,
   } = props;
   const [input, setInput] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
-  const [tab, setTab] = useState<"chat" | "notes">("chat");
   const [flashId, setFlashId] = useState<string | null>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -182,7 +197,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
   useEffect(() => {
     stick.current = true;
     setConfirmReset(false);
-    setTab("chat");
   }, [chat.kind, chat.id]);
 
   // Grow the textarea with its content.
@@ -210,8 +224,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
   const label = (id?: string) => providers.find((p) => p.id === (id ?? "agy"))?.label;
 
   const exportCurrent = () => {
-    const md = tab === "notes" ? notesMarkdown(chat, providers, docName) : chatMarkdown(chat, providers, docName);
-    downloadText(`${safeFilename(chat.name)} - ${tab === "notes" ? "notes" : "chat"}.md`, md);
+    const md = tab === "pinned" ? notesMarkdown(chat, providers, docName) : chatMarkdown(chat, providers, docName);
+    downloadText(`${safeFilename(chat.name)} - ${tab === "pinned" ? "pinned" : "chat"}.md`, md);
   };
 
   return (
@@ -277,7 +291,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
       )}
 
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-zinc-100 px-3 dark:border-zinc-900">
-        {(["chat", "notes"] as const).map((t) => (
+        {(["chat", "notes", "pinned"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -287,36 +301,55 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
                 ? "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
                 : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200",
             )}
+            title={t === "notes" ? "Your notes: Markdown files next to the PDF" : t === "pinned" ? "Answers you pinned" : undefined}
           >
-            {t === "chat" ? "Chat" : <StickyNote className="size-3.5" />}
-            {t === "notes" && "Notes"}
-            {t === "notes" && pinnedCount > 0 && (
+            {t === "notes" && <NotebookPen className="size-3.5" />}
+            {t === "pinned" && <Pin className="size-3.5" />}
+            {t === "chat" ? "Chat" : t === "notes" ? "Notes" : "Pinned"}
+            {t === "pinned" && pinnedCount > 0 && (
               <span className="rounded-full bg-amber-100 px-1.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-500/20 dark:text-amber-200">
                 {pinnedCount}
               </span>
             )}
           </button>
         ))}
-        <button
-          onClick={exportCurrent}
-          disabled={tab === "chat" ? empty : pinnedCount === 0}
-          className="icon-btn ml-auto size-7"
-          title={tab === "notes" ? "Export notes as Markdown" : "Export chat as Markdown"}
-        >
-          <Download className="size-3.5" />
-        </button>
+        {tab !== "notes" && (
+          <button
+            onClick={exportCurrent}
+            disabled={tab === "chat" ? empty : pinnedCount === 0}
+            className="icon-btn ml-auto size-7"
+            title={tab === "pinned" ? "Export pinned answers as Markdown" : "Export chat as Markdown"}
+          >
+            <Download className="size-3.5" />
+          </button>
+        )}
       </div>
+
+      {tab === "notes" && (
+        <div className="min-h-0 flex-1">
+          <NotesPanel
+            owners={props.noteOwners}
+            open={props.openNote}
+            onOpen={props.onOpenNote}
+            refresh={props.notesRefresh}
+            onJump={onJump}
+            hasDoc={hasDoc}
+            textSize={textSize}
+          />
+        </div>
+      )}
 
       <div
         ref={scroller}
+        hidden={tab === "notes"}
         onScroll={(e) => {
           const el = e.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
         className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
       >
-        {tab === "notes" ? (
-          <NotesView {...props} label={label} onPreview={setPreview} prep={prep} />
+        {tab === "pinned" ? (
+          <PinnedView {...props} label={label} onPreview={setPreview} prep={prep} />
         ) : (
           <>
             {!isFolder && chat.hasText === false && (
@@ -635,12 +668,13 @@ function MessageView(
             "flex items-center gap-1 transition hover:text-amber-600",
             m.pinned ? "text-amber-600 dark:text-amber-400" : "opacity-0 group-hover:opacity-100 focus:opacity-100",
           )}
-          title={m.pinned ? "Remove from notes" : "Pin to notes"}
+          title={m.pinned ? "Unpin" : "Pin this answer (see the Pinned tab)"}
         >
           {m.pinned ? <PinOff className="size-3" /> : <Pin className="size-3" />}
           {m.pinned ? "Pinned" : "Pin"}
         </button>
         <CopyButton text={m.content} />
+        <InsertButton onClick={(at) => props.onInsertAnswer(m.id, at)} />
         {other && !busy && (
           <button
             onClick={() => onSecondOpinion(m.id, other.id)}
@@ -660,7 +694,7 @@ function MessageView(
 }
 
 /** Pinned answers with the question they belong to, and an own note each. */
-function NotesView(props: ViewProps) {
+function PinnedView(props: ViewProps) {
   const { chat, textSize: size, label, onJump, hasDoc, docName, onJumpQuote, onPin, onNote, prep } = props;
   const pinned = chat.messages.filter((m) => m.role === "assistant" && m.pinned);
   if (!pinned.length) {
@@ -669,9 +703,10 @@ function NotesView(props: ViewProps) {
         <div className="mb-3 flex size-11 items-center justify-center rounded-2xl bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300">
           <Pin className="size-5" />
         </div>
-        <p className="text-sm font-medium">No notes yet</p>
+        <p className="text-sm font-medium">Nothing pinned yet</p>
         <p className="mt-1 max-w-64 text-xs text-zinc-500">
-          Hover an answer in the chat and click <b>Pin</b> to keep it here — you can add your own note to every pinned answer.
+          Hover an answer in the chat and click <b>Pin</b> to keep it here — you can add a comment to every pinned answer, or put it into one of
+          your notes.
         </p>
       </div>
     );
@@ -684,7 +719,8 @@ function NotesView(props: ViewProps) {
           <article key={a.id} className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
             <div className="mb-2 flex items-start gap-2">
               <p className="min-w-0 flex-1 text-xs font-medium text-zinc-500">{q?.content.split("\n")[0].slice(0, 140)}</p>
-              <button onClick={() => onPin(a.id, false)} className="text-zinc-400 hover:text-amber-600" title="Remove from notes">
+              <InsertButton compact onClick={(at) => props.onInsertAnswer(a.id, at)} />
+              <button onClick={() => onPin(a.id, false)} className="text-zinc-400 hover:text-amber-600" title="Unpin">
                 <PinOff className="size-3.5" />
               </button>
             </div>
@@ -817,6 +853,31 @@ function toolLabel(t: ToolEvent) {
   if (["read_file", "view_file", "Read"].includes(t.name)) return "Reading the document…";
   if (["grep_search", "Grep", "Glob"].includes(t.name)) return "Searching the document…";
   return `Using ${t.name.replace(/_/g, " ")}…`;
+}
+
+/** "Insert into note": opens the note picker below the button. */
+function InsertButton({ onClick, compact }: { onClick: (at: Anchor) => void; compact?: boolean }) {
+  const open = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    onClick({ left: r.left, top: r.bottom + 4 });
+  };
+  if (compact) {
+    return (
+      <button onClick={open} className="text-zinc-400 hover:text-violet-600" title="Insert into a note">
+        <NotebookPen className="size-3.5" />
+      </button>
+    );
+  }
+  return (
+    <button
+      onClick={open}
+      className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100 hover:text-zinc-700 focus:opacity-100 dark:hover:text-zinc-200"
+      title="Insert this answer into one of your notes"
+    >
+      <NotebookPen className="size-3" />
+      Insert into note
+    </button>
+  );
 }
 
 function CopyButton({ text }: { text: string }) {

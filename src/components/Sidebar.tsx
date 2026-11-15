@@ -1,7 +1,22 @@
 import clsx from "clsx";
 import { Check, ChevronRight, FileText, Folder, FolderInput, FolderOpen, FolderPlus, Loader2, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { DocSummary, FolderSummary } from "../lib/api";
+import { api, type ChatTarget, type DocSummary, type FolderSummary } from "../lib/api";
+
+/** A delete confirmation that names the notes going with it (counted when you click the bin). */
+function useNoteCount(target: ChatTarget, asking: boolean) {
+  const [count, setCount] = useState<number | null>(null);
+  useEffect(() => {
+    if (!asking) return setCount(null);
+    let cancelled = false;
+    api.listNotes(target).then((l) => !cancelled && setCount(l.length), () => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [asking, target.kind, target.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  return count;
+}
+const withNotes = (n: number | null) => (n ? ` + ${n} note${n === 1 ? "" : "s"}` : "");
 
 /** Drag type for moving a document between folders. */
 const DOC_MIME = "application/x-ydust-doc";
@@ -220,6 +235,7 @@ function FolderRow({
   onDelete: () => void;
 }) {
   const [confirm, setConfirm] = useState(false);
+  const notes = useNoteCount({ kind: "folder", id: folder.id }, confirm);
   const Icon = open ? FolderOpen : Folder;
   return (
     <div
@@ -281,9 +297,9 @@ function FolderRow({
             }}
             onBlur={() => setConfirm(false)}
             className="rounded-md bg-red-600 px-1.5 py-0.5 text-[11px] font-medium text-white"
-            title="Deletes the folder and its chat. The PDFs stay in your library."
+            title={`Deletes the folder, its chat${notes ? ` and its ${notes} note${notes === 1 ? "" : "s"}` : ""}. The PDFs stay in your library.`}
           >
-            Delete
+            Delete{withNotes(notes)}
           </button>
         ) : (
           <button
@@ -305,6 +321,7 @@ function FolderRow({
 function DocRow(props: Props & { doc: DocSummary; onNewFolder: (docId: string) => void }) {
   const { doc: d, folders, activeId, indexing, onSelect, onDelete, onRename, onMove, onNewFolder } = props;
   const [confirm, setConfirm] = useState(false);
+  const notes = useNoteCount({ kind: "doc", id: d.id }, confirm);
   const [editing, setEditing] = useState(false);
   const [menu, setMenu] = useState(false);
   const active = d.id === activeId;
@@ -380,8 +397,9 @@ function DocRow(props: Props & { doc: DocSummary; onNewFolder: (docId: string) =
               onBlur={() => setConfirm(false)}
               autoFocus
               className="rounded-md bg-red-600 px-1.5 py-0.5 text-[11px] font-medium text-white"
+              title={`Deletes the PDF, its chat${notes ? ` and its ${notes} note${notes === 1 ? "" : "s"}` : ""}`}
             >
-              Delete
+              Delete{withNotes(notes)}
             </button>
           ) : (
             <button

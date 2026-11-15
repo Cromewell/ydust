@@ -1,10 +1,10 @@
-import type { Chat, Message, ProviderInfo } from "./api";
+import type { Chat, Message, Note, NoteOwner, ProviderInfo } from "./api";
 
 /** Resolves a document id to its name (quotes in folder chats). */
 type DocName = (id: string) => string | undefined;
 
 /** In-app links "[p. 3](#page=3)", "[Script, p. 3](#doc=d2&page=3)" mean nothing outside ydust: keep them as text. */
-const plainCitations = (md: string) => md.replace(/\[([^\]]+)\]\(#(?:doc=[\w-]+&)?page=\d+\)/g, "($1)");
+export const plainCitations = (md: string) => md.replace(/\[([^\]]+)\]\(#(?:doc=[\w-]+&)?page=\d+\)/g, "($1)");
 
 const quoteBlock = (m: Message, docName?: DocName) => {
   if (!m.quote) return "";
@@ -58,6 +58,18 @@ export function notesMarkdown(chat: Chat, providers: ProviderInfo[], docName?: D
     out += `${plainCitations(a.content)}\n\n_— ${who(a, providers)}_\n\n`;
   }
   if (!pinned.length) out += "_No pinned answers yet._\n";
+  return out;
+}
+
+/** All note files of a document and its folder, as one Markdown file. */
+export function noteFilesMarkdown(groups: { owner: NoteOwner; notes: Note[] }[]) {
+  let out = `# Notes\n\n_Exported from ydust on ${new Date().toLocaleString()}_\n\n`;
+  for (const { owner, notes } of groups) {
+    if (!notes.length) continue;
+    for (const n of notes) {
+      out += `---\n\n_${owner.kind === "folder" ? `Folder “${owner.name}”` : owner.name} · ${n.name}_\n\n${plainCitations(n.content).trim()}\n\n`;
+    }
+  }
   return out;
 }
 

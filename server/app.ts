@@ -2,14 +2,17 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { Hono, type Context, type Next } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import { PROVIDERS, isProviderId } from "./providers/index.ts";
 import { searchServer } from "./mcp/launch.ts";
+import { MAX_NOTE_BYTES, NoteError, deleteNote, listNotes, readNote, renameNote, saveNote } from "./notes.ts";
 import { buildPrompt, scopeSignature, type DocRef, type Scope } from "./prompt.ts";
 import {
   IMAGE_TYPES,
   LIBRARY_DIR,
   chatDir,
+  chatExists,
   clearImages,
   createDoc,
   createFolder,
@@ -312,6 +315,42 @@ function chatRoutes(kind: ChatKind, base: string) {
     });
     return found ? c.json(found) : c.json({ error: "not found" }, 404);
   });
+
+  // --- Notes (Markdown files in the chat's notes/ folder) ---
+
+  /** Runs a note operation; refusals become their status code (409 carries the current content). */
+  const notes = (fn: (c: Context, id: string) => Promise<Response>) => async (c: Context) => {
+    const id = c.req.param("id")!;
+    if (!(await chatExists(kind, id))) return c.json({ error: "not found" }, 404);
+    try {
+      return await fn(c, id);
+    } catch (err) {
+      if (!(err instanceof NoteError)) throw err;
+      return c.json(err.current === undefined ? { error: err.message } : { error: err.message, current: err.current }, err.status);
+    }
+  };
+  // JSON escaping can make the body larger than the note itself; the exact limit is checked on the content.
+  const noteBody = bodyLimit({ maxSize: 3 * MAX_NOTE_BYTES, onError: (c) => c.json({ error: "A note can be at most 1 MB." }, 413) });
+
+  app.get(`${base}/:id/notes`, notes(async (c, id) => c.json(await listNotes(kind, id))));
+  app.get(`${base}/:id/notes/:name`, notes(async (c, id) => c.json(await readNote(kind, id, c.req.param("name")!))));
+  app.put(
+    `${base}/:id/notes/:name`,
+    noteBody,
+    notes(async (c, id) => {
+      const { content, baseVersion = null } = await c.req.json<{ content?: unknown; baseVersion?: unknown }>();
+      const { content: _, ...saved } = await saveNote(kind, id, c.req.param("name")!, content, baseVersion);
+      return c.json(saved);
+    }),
+  );
+  app.patch(`${base}/:id/notes/:name`, notes(async (c, id) => c.json(await renameNote(kind, id, c.req.param("name")!, (await c.req.json<{ name?: unknown }>()).name))));
+  app.delete(
+    `${base}/:id/notes/:name`,
+    notes(async (c, id) => {
+      await deleteNote(kind, id, c.req.param("name")!);
+      return c.json({ ok: true });
+    }),
+  );
 
   app.post(`${base}/:id/images`, async (c) => {
     const id = c.req.param("id");
