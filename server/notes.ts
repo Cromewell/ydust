@@ -61,8 +61,15 @@ async function hasDir(dir: string): Promise<boolean> {
   return true;
 }
 
-/** Content of a note file, or null if there is none. Links are not followed. */
-async function readPlain(file: string): Promise<{ content: string; mtime: Date } | null> {
+/**
+ * Content of the note with exactly this name, or null if there is none. On Windows and macOS
+ * "CASE.md" would open "case.md" too: only the exact name counts, as on Linux, so a note is
+ * never read, overwritten, renamed or deleted under another spelling. Links are not followed.
+ */
+async function readPlain(dir: string, name: string): Promise<{ content: string; mtime: Date } | null> {
+  if (!(await hasDir(dir))) return null;
+  if (!(await readdir(dir)).includes(name)) return null;
+  const file = path.join(dir, name);
   const info = await lstat(file).catch((err) => (isMissing(err) ? null : Promise.reject(err)));
   if (!info) return null;
   if (!info.isFile()) throw new NoteError("That note is not a plain file.", 400);
@@ -115,9 +122,8 @@ export async function listNotes(kind: ChatKind, id: string): Promise<NoteInfo[]>
 
 export async function readNote(kind: ChatKind, id: string, name: string): Promise<Note> {
   const dir = notesDir(kind, id);
-  const file = notePath(dir, name);
-  if (!(await hasDir(dir))) throw new NoteError("Note not found.", 404);
-  const got = await readPlain(file);
+  notePath(dir, name);
+  const got = await readPlain(dir, name);
   if (!got) throw new NoteError("Note not found.", 404);
   return { ...info(name, got.content, got.mtime), content: got.content, version: versionOf(got.content) };
 }
@@ -144,7 +150,7 @@ export async function saveNote(kind: ChatKind, id: string, name: string, content
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       });
     }
-    const existing = await readPlain(file);
+    const existing = await readPlain(dir, name);
     if (existing === null) {
       if (baseVersion !== null) throw new NoteError("This note was deleted or renamed meanwhile.", 409, null);
       const all = await names(dir);
@@ -174,7 +180,7 @@ export async function renameNote(kind: ChatKind, id: string, from: string, to: u
   if (typeof to !== "string") throw new NoteError("`name` must be a string.", 400);
   const dst = notePath(dir, to);
   return locked(dir, async () => {
-    const got = (await hasDir(dir)) ? await readPlain(src) : null;
+    const got = await readPlain(dir, from);
     if (!got) throw new NoteError("Note not found.", 404);
     if (from !== to) {
       // On Windows and macOS "Summary.md" and "summary.md" are the same file: only a change of case may "clash".
@@ -190,9 +196,7 @@ export async function deleteNote(kind: ChatKind, id: string, name: string): Prom
   const dir = notesDir(kind, id);
   const file = notePath(dir, name);
   return locked(dir, async () => {
-    const st = (await hasDir(dir)) ? await lstat(file).catch(() => null) : null;
-    if (!st) throw new NoteError("Note not found.", 404);
-    if (!st.isFile()) throw new NoteError("That note is not a plain file.", 400);
+    if (!(await readPlain(dir, name))) throw new NoteError("Note not found.", 404);
     await rm(file);
   });
 }

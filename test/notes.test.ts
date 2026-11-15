@@ -121,6 +121,20 @@ describe("notes routes", () => {
     expect((await res.json()).error).toContain(`"case.md" already exists`);
   });
 
+  // On Windows and macOS the file system would open "case.md" for "CASE.md": only the exact name may count.
+  it("never reads, writes, renames or deletes a note under another spelling", async () => {
+    const v = (await (await req("PUT", `/api/docs/${doc}/notes/spelling.md`, { content: "keep", baseVersion: null })).json()).version;
+    expect((await req("GET", `/api/docs/${doc}/notes/SPELLING.md`)).status).toBe(404);
+    const save = await req("PUT", `/api/docs/${doc}/notes/SPELLING.md`, { content: "other", baseVersion: v });
+    expect(save.status).toBe(409);
+    expect((await save.json()).current).toBeNull();
+    expect((await req("PATCH", `/api/docs/${doc}/notes/SPELLING.md`, { name: "moved.md" })).status).toBe(404);
+    expect((await req("DELETE", `/api/docs/${doc}/notes/SPELLING.md`)).status).toBe(404);
+    const dir = notesDir("doc", doc);
+    expect(await readdir(dir)).toContain("spelling.md");
+    expect(await readFile(path.join(dir, "spelling.md"), "utf8")).toBe("keep");
+  });
+
   it("reports a deleted note as a conflict, not a silent re-create", async () => {
     const url = `/api/docs/${doc}/notes/gone.md`;
     const v = (await (await req("PUT", url, { content: "x", baseVersion: null })).json()).version;
