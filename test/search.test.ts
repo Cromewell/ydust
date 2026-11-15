@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MCP_TOOLS, searchServer } from "../server/mcp/launch.ts";
+import { searchServer } from "../server/mcp/launch.ts";
 import { readPages, search, type ScopeDoc } from "../server/mcp/search.ts";
 
 // search.ts caches pages per alias for the life of the process: every fixture gets its own alias.
@@ -165,7 +165,7 @@ describe("MCP server over stdio", () => {
       child.stdin!.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
       const list = await call("tools/list");
-      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual([...MCP_TOOLS]);
+      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "read_pages"]);
 
       const hit = await call("tools/call", { name: "search", arguments: { query: "Rolle" } });
       expect(hit.result.isError).toBeUndefined();

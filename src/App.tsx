@@ -23,7 +23,7 @@ import { PdfViewer, type Flash, type Mark, type PdfSelection, type SearchState, 
 import { SearchBar, type SearchHit } from "./components/SearchBar";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { Sidebar } from "./components/Sidebar";
-import { api, ask, type Chat, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
+import { api, ask, type Chat, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
 import { questionOf } from "./lib/export";
 import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
 import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
@@ -495,7 +495,7 @@ export default function App() {
       question: string,
       withQuote: Quote | null,
       withImages: Attachment[] = [],
-      opts: { mode?: "check"; secondOpinionOf?: string; via?: string } = {},
+      opts: { mode?: "check"; secondOpinionOf?: string; via?: string; draft?: MessageDraft } = {},
     ) => {
       if (!target || abortRef.current) return;
       const t = target;
@@ -525,7 +525,8 @@ export default function App() {
       setQuote(null);
       if (opts.mode) setCheckMode(false);
       setShowChat(true);
-      setStreaming({ text: "", tools: [] });
+      setPanelTab("chat"); // the answer is in the chat, even when asked from the Notes tab
+      setStreaming({ text: "", tools: [], drafts: [] });
       pushMessage(key, {
         id: "pending",
         role: "user",
@@ -534,6 +535,7 @@ export default function App() {
         images: imageIds.length ? imageIds : undefined,
         mode: opts.mode,
         secondOpinionOf: opts.secondOpinionOf,
+        draftRef: opts.draft ? { id: opts.draft.id, target: opts.draft.target, revision: opts.draft.revision } : undefined,
         createdAt: new Date().toISOString(),
       });
       let partial = "";
@@ -551,6 +553,7 @@ export default function App() {
             level: level === "auto" ? undefined : level,
             mode: opts.mode,
             secondOpinionOf: opts.secondOpinionOf,
+            draftId: opts.draft?.id,
           },
           {
             onUser: (m) => pushMessage(key, m),
@@ -559,6 +562,10 @@ export default function App() {
               setStreaming((s) => (s ? { ...s, text: s.text + t } : s));
             },
             onTool: (t) => setStreaming((s) => (s ? { ...s, tools: [...s.tools, t] } : s)),
+            onDraft: (d) => {
+              setStreaming((s) => (s ? { ...s, drafts: [...s.drafts.filter((x) => x.id !== d.replaces), d] } : s));
+              if (d.replaces) markDrafts(key, { [d.replaces]: { status: "superseded" } });
+            },
             onDone: (m) => pushMessage(key, m),
           },
           controller.signal,
@@ -577,8 +584,16 @@ export default function App() {
         countMessages(t, 2);
       }
     },
-    [target, models, efforts, provider, language, level, flash, setAttachments], // eslint-disable-line react-hooks/exhaustive-deps
+    [target, models, efforts, provider, language, level, flash, setAttachments, setPanelTab], // eslint-disable-line react-hooks/exhaustive-deps
   );
+
+  /** Set the status of drafts on the answers of that chat (if it is still on screen). */
+  const markDrafts = (key: string, update: Record<string, Pick<MessageDraft, "status" | "acceptedAs">>) =>
+    setChat((c) =>
+      c && chatKeyOf(c) === key
+        ? { ...c, messages: c.messages.map((m) => (m.drafts?.some((d) => update[d.id]) ? { ...m, drafts: m.drafts.map((d) => (update[d.id] ? { ...d, ...update[d.id] } : d)) } : m)) }
+        : c,
+    );
 
   const secondOpinion = useCallback(
     (messageId: string, via: string) => void send("Second opinion", null, [], { secondOpinionOf: messageId, via }),
@@ -609,6 +624,29 @@ export default function App() {
     [chat, docs],
   );
 
+  /** One of the chat's notes, in the Notes tab. */
+  const openChatNote = useCallback(
+    (name: string) => {
+      const owner = chat && noteOwners.find((o) => o.kind === chat.kind && o.id === chat.id);
+      if (!owner) return;
+      setOpenNote({ owner, name });
+      setPanelTab("notes");
+      setShowChat(true);
+    },
+    [chat, noteOwners, setPanelTab],
+  );
+
+  /** Accepted or discarded: mark it (and its earlier versions); an accepted draft opens in the Notes tab. */
+  const draftDecided = useCallback(
+    (d: MessageDraft, outcome: { accepted?: string; removed: string[] }) => {
+      if (!chat) return;
+      const status = (id: string) => (id !== d.id ? "superseded" : outcome.accepted ? "accepted" : "discarded");
+      markDrafts(chatKeyOf(chat), Object.fromEntries(outcome.removed.map((id) => [id, { status: status(id), ...(id === d.id && outcome.accepted ? { acceptedAs: outcome.accepted } : {}) }])));
+      setNotesRefresh((n) => n + 1);
+      if (outcome.accepted) openChatNote(outcome.accepted);
+    },
+    [chat, openChatNote], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   const updateMessage = useCallback(
     async (messageId: string, patch: { pinned?: boolean; note?: string }) => {
       if (!target) return;
@@ -1169,6 +1207,9 @@ export default function App() {
             onOpenNote={setOpenNote}
             notesRefresh={notesRefresh}
             onInsertAnswer={insertAnswer}
+            onDraftDecided={draftDecided}
+            onRequestChanges={(d, feedback) => void send(feedback, null, [], { draft: d })}
+            onOpenChatNote={openChatNote}
             onPin={(mid, pinned) => void updateMessage(mid, { pinned })}
             onNote={(mid, note) => void updateMessage(mid, { note })}
             onLanguage={(l) => {

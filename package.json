@@ -29,6 +29,7 @@
     "@lezer/highlight": "^1.2.5",
     "clsx": "^2.1.1",
     "cross-spawn": "^7.0.6",
+    "diff": "^9.0.0",
     "hono": "^4.13.18",
     "katex": "^0.19.1",
     "lucide-react": "^1.72.0",

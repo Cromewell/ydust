@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable } from "node:stream";
@@ -5,8 +6,9 @@ import { Hono, type Context, type Next } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import { PROVIDERS, isProviderId } from "./providers/index.ts";
-import { searchServer } from "./mcp/launch.ts";
-import { MAX_NOTE_BYTES, NoteError, deleteNote, listNotes, readNote, renameNote, saveNote } from "./notes.ts";
+import { acceptDraft, clearDrafts, createDraft, discardDraft, getDraft, listDrafts, type DraftInfo } from "./drafts.ts";
+import { ydustServer } from "./mcp/launch.ts";
+import { MAX_NOTE_BYTES, NoteError, deleteNote, listNotes, notesDir, readNote, renameNote, saveNote } from "./notes.ts";
 import { buildPrompt, scopeSignature, type DocRef, type Scope } from "./prompt.ts";
 import {
   IMAGE_TYPES,
@@ -46,6 +48,7 @@ import {
   type ChatKind,
   type DocMeta,
   type Message,
+  type MessageDraft,
   type Quote,
 } from "./store.ts";
 
@@ -53,13 +56,47 @@ const MAX_UPLOAD = 200 * 1024 * 1024;
 const MAX_IMAGE = 20 * 1024 * 1024;
 const MAX_IMAGES_PER_QUESTION = 10;
 const MAX_OUTLINE = 200_000;
-/** Bump when ydust's document tools change, so resumed sessions are told about them. */
-const TOOLS_VERSION = 1;
+/** Bump when ydust's tools change, so resumed sessions are told about them. */
+const TOOLS_VERSION = 2;
+
+/** Where ydust's MCP server reaches this server (set by index.ts once it listens; tests set it too). */
+export const runtime = { apiBase: "" };
 
 /** All API routes. server/index.ts serves it (tests call `app.request` without a port). */
 export const app = new Hono();
 /** One running turn per chat ("doc:<id>" / "folder:<id>"). `done` settles once the process has exited. */
 const running = new Map<string, { controller: AbortController; done: Promise<void> }>();
+
+/** A running turn, as ydust's MCP server sees it: it proves itself with the turn's token. */
+type Turn = {
+  kind: ChatKind;
+  id: string;
+  provider: string;
+  /** "Request changes": the draft this turn revises. */
+  revises: { id: string; target: string } | null;
+  /** Drafts proposed so far, and the latest one per note (a second write in a turn revises the first). */
+  drafts: DraftInfo[];
+  latest: Map<string, string>;
+  emit: (event: string, data: unknown) => void;
+};
+const turns = new Map<string, Turn>();
+
+/** Set the status of drafts on the answers that proposed them. */
+function markDrafts(kind: ChatKind, id: string, update: Record<string, Pick<MessageDraft, "status" | "acceptedAs">>) {
+  return updateChat(kind, id, (m) => {
+    for (const msg of m.messages) {
+      for (const d of msg.drafts ?? []) if (update[d.id]) Object.assign(d, update[d.id]);
+    }
+  }).catch(() => {});
+}
+const asMessageDraft = (d: DraftInfo): MessageDraft => ({
+  id: d.id,
+  target: d.target,
+  mode: d.mode,
+  summary: d.summary,
+  revision: d.revision,
+  ...(d.replaces ? { replaces: d.replaces } : {}),
+});
 const chatKey = (kind: ChatKind, id: string) => `${kind}:${id}`;
 
 // Only this app may talk to the API: block DNS rebinding (foreign Host header) and
@@ -112,6 +149,31 @@ app.get("/api/providers", async (c) =>
     ),
   ),
 );
+
+// --- ydust's MCP server → this server (only while a turn runs, with its token) ---
+
+app.post("/api/internal/drafts", async (c) => {
+  // Only the MCP process (a plain local HTTP client) calls this, never a web page: browsers send
+  // Origin and Sec-Fetch-Site with every POST, Node's fetch sends neither (it does send Sec-Fetch-Mode).
+  if (c.req.header("origin") || c.req.header("sec-fetch-site")) return c.json({ error: "forbidden" }, 403);
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+  const turn = typeof body.token === "string" && body.token.length === 64 ? turns.get(body.token) : undefined;
+  if (!turn) return c.json({ error: "This conversation turn has ended." }, 403);
+  const target = typeof body.target === "string" ? body.target : "";
+  const replaces = turn.latest.get(target) ?? (turn.revises?.target === target ? turn.revises.id : null);
+  try {
+    const draft = await createDraft(turn.kind, turn.id, { ...body, target: body.target, provider: turn.provider, replaces } as Parameters<typeof createDraft>[2]);
+    const { content: _, ...meta } = draft;
+    turn.drafts = [...turn.drafts.filter((d) => d.id !== draft.replaces), meta];
+    turn.latest.set(draft.target, draft.id);
+    if (draft.replaces) await markDrafts(turn.kind, turn.id, { [draft.replaces]: { status: "superseded" } });
+    turn.emit("draft", asMessageDraft(meta));
+    return c.json({ id: draft.id, target: draft.target, mode: draft.mode, revision: draft.revision });
+  } catch (err) {
+    if (err instanceof NoteError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+});
 
 // --- Documents ---
 
@@ -294,6 +356,7 @@ function chatRoutes(kind: ChatKind, base: string) {
       delete m.toolsVersion;
     });
     await clearImages(chatDir(kind, id));
+    await clearDrafts(kind, id);
     return c.json(chat);
   });
 
@@ -352,6 +415,30 @@ function chatRoutes(kind: ChatKind, base: string) {
     }),
   );
 
+  // --- Drafts (proposed by the assistant, waiting for the user) ---
+
+  app.get(`${base}/:id/drafts`, notes(async (c, id) => c.json(await listDrafts(kind, id))));
+  app.get(`${base}/:id/drafts/:did`, notes(async (c, id) => c.json(await getDraft(kind, id, c.req.param("did")!))));
+  app.post(
+    `${base}/:id/drafts/:did/accept`,
+    notes(async (c, id) => {
+      const did = c.req.param("did")!;
+      const body = await c.req.json<{ target?: unknown; base?: unknown }>().catch(() => ({}));
+      const r = await acceptDraft(kind, id, did, body);
+      await markDrafts(kind, id, Object.fromEntries(r.removed.map((x) => [x, x === did ? { status: "accepted", acceptedAs: r.target } : { status: "superseded" }])));
+      return c.json(r);
+    }),
+  );
+  app.delete(
+    `${base}/:id/drafts/:did`,
+    notes(async (c, id) => {
+      const did = c.req.param("did")!;
+      const removed = await discardDraft(kind, id, did);
+      await markDrafts(kind, id, Object.fromEntries(removed.map((x) => [x, { status: x === did ? "discarded" : "superseded" }])));
+      return c.json({ ok: true, removed });
+    }),
+  );
+
   app.post(`${base}/:id/images`, async (c) => {
     const id = c.req.param("id");
     if (!(await readChat(kind, id))) return c.json({ error: "not found" }, 404);
@@ -394,6 +481,8 @@ function chatRoutes(kind: ChatKind, base: string) {
       mode?: string;
       /** Id of an assistant message: ask the same question again (to another assistant). */
       secondOpinionOf?: string;
+      /** "Request changes" to this draft: the question is the user's feedback. */
+      draftId?: string;
     }>();
     const { model, effort, language, level, secondOpinionOf, provider: providerId = "agy" } = body;
     let { question, quote, images } = body;
@@ -413,6 +502,15 @@ function chatRoutes(kind: ChatKind, base: string) {
     const loaded = chat && (await loadScope(kind, id));
     if (!chat || !loaded) return c.json({ error: "not found" }, 404);
     const { scope, docs, readDirs } = loaded;
+
+    // Request changes to a draft: its text goes into the prompt, the next write_note revises it.
+    let revision: { id: string; target: string; mode: string; revision: number; content: string } | undefined;
+    if (typeof body.draftId === "string") {
+      const d = await getDraft(kind, id, body.draftId).catch(() => null);
+      if (!d) return c.json({ error: "That draft no longer exists." }, 404);
+      if (d.status !== "open") return c.json({ error: "A newer version of that draft exists." }, 409);
+      revision = { id: d.id, target: d.target, mode: d.mode, revision: d.revision, content: d.content };
+    }
 
     // Second opinion: repeat the question that led to that answer, and show the answer.
     let otherAnswer: { by: string; content: string } | undefined;
@@ -456,12 +554,17 @@ function chatRoutes(kind: ChatKind, base: string) {
     const told = chat.contextSigs?.[providerId] ?? (scope.kind === "doc" ? scopeSignature({ ...scope, folder: null }) : "");
     // ydust's search/read_pages tools over the chat's documents (that have text); the first is the default.
     const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile }));
-    const mcp = searchable.length ? searchServer(searchable) : null;
+    // …and the chat's notes; drafts come back here with this turn's token.
+    const token = randomBytes(32).toString("hex");
+    const { server: mcp, tools: mcpTools } = ydustServer(searchable, { dir: notesDir(kind, id), api: runtime.apiBase || undefined, token });
 
     const controller = new AbortController();
     let finish!: () => void;
     running.set(key, { controller, done: new Promise<void>((r) => (finish = r)) });
+    const turn: Turn = { kind, id, provider: providerId, revises: revision ? { id: revision.id, target: revision.target } : null, drafts: [], latest: new Map(), emit: () => {} };
+    turns.set(token, turn);
     const release = () => {
+      turns.delete(token);
       running.delete(key);
       finish();
     };
@@ -475,6 +578,7 @@ function chatRoutes(kind: ChatKind, base: string) {
         images: imageIds.length ? imageIds : undefined,
         mode,
         secondOpinionOf: otherAnswer ? secondOpinionOf : undefined,
+        draftRef: revision ? { id: revision.id, target: revision.target, revision: revision.revision } : undefined,
       });
       await updateChat(kind, id, (m) => void m.messages.push(userMsg));
       // Everything since this assistant's last answer (all of it, if it has no session here).
@@ -492,8 +596,10 @@ function chatRoutes(kind: ChatKind, base: string) {
         language: typeof language === "string" ? language : undefined,
         firstTurn: !sessionId,
         contextChanged: !!sessionId && told !== signature,
-        tools: !!mcp,
-        toolsIntro: !!mcp && !!sessionId && (chat.toolsVersion?.[providerId] ?? 0) < TOOLS_VERSION,
+        tools: searchable.length > 0,
+        noteTools: mcpTools.includes("write_note") ? "write" : "read",
+        toolsIntro: !!sessionId && (chat.toolsVersion?.[providerId] ?? 0) < TOOLS_VERSION,
+        revision,
         // What the other assistant discussed meanwhile is handed over as context
         // (everything, if this assistant starts a new session).
         history: unseen.filter((m) => (sessionId ? answeredBy(m) !== providerId : true) && !shownAlready.has(m.id)),
@@ -513,6 +619,7 @@ function chatRoutes(kind: ChatKind, base: string) {
       let chain = Promise.resolve();
       const send = (event: string, data: unknown) =>
         (chain = chain.then(() => stream.writeSSE({ event, data: JSON.stringify(data) })).catch(() => {}));
+      turn.emit = (event, data) => void send(event, data);
 
       let assistant;
       try {
@@ -525,6 +632,7 @@ function chatRoutes(kind: ChatKind, base: string) {
           cwd: dir,
           readDirs,
           mcp,
+          mcpTools,
           sessionId,
           model: cleanModel,
           signal: controller.signal,
@@ -556,6 +664,7 @@ function chatRoutes(kind: ChatKind, base: string) {
           model: usedModel ?? undefined,
           modelLabel: usedModel ? await provider.describeModel(usedModel).catch(() => usedModel) : undefined,
           effort: cleanEffort ?? (await provider.defaultEffort().catch(() => null)) ?? undefined,
+          drafts: turn.drafts.length ? turn.drafts.map(asMessageDraft) : undefined,
         });
         await updateChat(kind, id, (m) => {
           m.messages.push(assistant!);
@@ -563,14 +672,20 @@ function chatRoutes(kind: ChatKind, base: string) {
             m.conversations[providerId] = result.sessionId;
             m.sessionTags = { ...m.sessionTags, [providerId]: tag };
             m.contextSigs = { ...m.contextSigs, [providerId]: signature };
-            if (mcp) m.toolsVersion = { ...m.toolsVersion, [providerId]: TOOLS_VERSION };
+            m.toolsVersion = { ...m.toolsVersion, [providerId]: TOOLS_VERSION };
           }
           // A failed resume (e.g. the CLI's session file is gone) would fail forever: start over
           // next time — the conversation so far is then handed over as context.
           else if (error && !result.response.trim() && sessionId) delete m.conversations[providerId];
         }).catch(() => {}); // the chat may have been deleted meanwhile
       } catch (err) {
-        assistant = newMessage({ role: "assistant", content: (err as Error).message, error: true, provider: providerId });
+        assistant = newMessage({
+          role: "assistant",
+          content: (err as Error).message,
+          error: true,
+          provider: providerId,
+          drafts: turn.drafts.length ? turn.drafts.map(asMessageDraft) : undefined,
+        });
         await updateChat(kind, id, (m) => void m.messages.push(assistant!)).catch(() => {});
       } finally {
         release();

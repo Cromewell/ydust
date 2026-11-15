@@ -1,7 +1,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { MCP_NAME, MCP_TOOLS, type McpServer } from "../mcp/launch.ts";
+import { MCP_NAME, type McpServer } from "../mcp/launch.ts";
 import { cached, cliFile, runLines, runQuick, writeFileIfChanged, type AgentResult, type Model, type Provider, type RunOptions } from "./types.ts";
 
 const AGY_BIN = process.env.AGY_BIN ?? "agy";
@@ -49,19 +49,24 @@ async function prepareWorkspace(cwd: string, mcp: McpServer | null | undefined) 
  * `--mode plan` has no effect together with `--disable-slash-commands`). Deny wins over allow,
  * so other MCP tools aren't denied by a rule but stay unapproved, which headless agy refuses.
  */
-async function run(opts: RunOptions): Promise<AgentResult> {
-  await prepareWorkspace(opts.cwd, opts.mcp);
-  const settingsFile = cliFile(opts.cwd, "agy-settings.json");
-  const readDirs = opts.readDirs ?? [];
-  const settings = {
+/** Antigravity's permissions for a turn. */
+export function agySettings(opts: Pick<RunOptions, "cwd" | "readDirs" | "mcp" | "mcpTools">) {
+  return {
     permissions: {
       allow: [
-        ...[opts.cwd, ...readDirs].map((d) => `read_file(${d})`),
-        ...(opts.mcp ? MCP_TOOLS.map((t) => `mcp(${MCP_NAME}/${t})`) : []),
+        ...[opts.cwd, ...(opts.readDirs ?? [])].map((d) => `read_file(${d})`),
+        ...(opts.mcp ? (opts.mcpTools ?? []).map((t) => `mcp(${MCP_NAME}/${t})`) : []),
       ],
       deny: ["write_file(*)", "command(*)", "read_url(*)", "execute_url(*)", ...(opts.mcp ? [] : ["mcp(*)"])],
     },
   };
+}
+
+async function run(opts: RunOptions): Promise<AgentResult> {
+  await prepareWorkspace(opts.cwd, opts.mcp);
+  const settingsFile = cliFile(opts.cwd, "agy-settings.json");
+  const readDirs = opts.readDirs ?? [];
+  const settings = agySettings(opts);
   // The prompt goes in on stdin (stream-json), not as an argument: it can be long and
   // multi-line, which a command line can't carry everywhere (Windows: 32k chars, cmd.exe 8k).
   await writeFileIfChanged(settingsFile, JSON.stringify(settings, null, 2));
@@ -123,7 +128,7 @@ async function run(opts: RunOptions): Promise<AgentResult> {
           // MCP calls arrive as call_mcp_tool { ServerName, ToolName, Arguments }.
           const mcp = s.tool_name === "call_mcp_tool" && typeof p.ToolName === "string";
           const a = mcp ? (p.Arguments ?? {}) : {};
-          const detail = mcp ? (a.query ?? (a.from ? `${a.doc ?? ""} p. ${a.from}${a.to ? `–${a.to}` : ""}`.trim() : undefined)) : (p.Path ?? p.CommandLine ?? p.Url ?? p.Query);
+          const detail = mcp ? (a.query ?? a.name ?? (a.from ? `${a.doc ?? ""} p. ${a.from}${a.to ? `–${a.to}` : ""}`.trim() : undefined)) : (p.Path ?? p.CommandLine ?? p.Url ?? p.Query);
           opts.onEvent({
             type: "tool",
             name: mcp ? `${p.ServerName}/${p.ToolName}` : s.tool_name,

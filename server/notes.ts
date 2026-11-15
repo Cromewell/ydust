@@ -105,8 +105,10 @@ async function names(dir: string): Promise<string[]> {
   return (await readdir(dir, { withFileTypes: true })).filter((e) => e.isFile() && isValidNoteName(e.name)).map((e) => e.name);
 }
 
-export async function listNotes(kind: ChatKind, id: string): Promise<NoteInfo[]> {
-  const dir = notesDir(kind, id);
+export const listNotes = (kind: ChatKind, id: string) => listNotesIn(notesDir(kind, id));
+
+/** The notes in a notes folder (also used by the MCP server, which gets the folder from ydust). */
+export async function listNotesIn(dir: string): Promise<NoteInfo[]> {
   const out = await Promise.all(
     (await names(dir)).map(async (name) => {
       const file = path.join(dir, name);
@@ -120,8 +122,9 @@ export async function listNotes(kind: ChatKind, id: string): Promise<NoteInfo[]>
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }));
 }
 
-export async function readNote(kind: ChatKind, id: string, name: string): Promise<Note> {
-  const dir = notesDir(kind, id);
+export const readNote = (kind: ChatKind, id: string, name: string) => readNoteIn(notesDir(kind, id), name);
+
+export async function readNoteIn(dir: string, name: string): Promise<Note> {
   notePath(dir, name);
   const got = await readPlain(dir, name);
   if (!got) throw new NoteError("Note not found.", 404);

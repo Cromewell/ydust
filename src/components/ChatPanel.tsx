@@ -20,17 +20,18 @@ import {
   X,
 } from "lucide-react";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { api, type Chat, type Message, type NoteOwner, type ProviderInfo, type Quote, type ToolEvent } from "../lib/api";
+import { api, type Chat, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote, type ToolEvent } from "../lib/api";
 import { chatMarkdown, downloadText, notesMarkdown, questionOf, safeFilename } from "../lib/export";
 import { SIZE_CLASSES, type TextSize } from "../lib/settings";
 import { ChatSettings } from "./ChatSettings";
+import { DraftCard } from "./DraftCard";
 import { Markdown } from "./Markdown";
 import { ModelPicker } from "./ModelPicker";
 import type { Anchor } from "./NotePicker";
 import { NotesPanel, type OpenNote } from "./NotesPanel";
 import { PROVIDER_ICON, ProviderSwitch } from "./ProviderSwitch";
 
-export type Streaming = { text: string; tools: ToolEvent[] };
+export type Streaming = { text: string; tools: ToolEvent[]; drafts: MessageDraft[] };
 
 /** An image waiting in the composer (a snip of the PDF or a pasted picture). */
 export type Attachment = { key: string; blob: Blob; url: string; label: string };
@@ -90,6 +91,11 @@ type Props = {
   notesRefresh: number;
   /** Choose a note to put this answer into (the picker opens at `at`). */
   onInsertAnswer: (messageId: string, at: Anchor) => void;
+  /** A draft was accepted (into `accepted`) or discarded; `removed`: it and its earlier versions. */
+  onDraftDecided: (d: MessageDraft, outcome: { accepted?: string; removed: string[] }) => void;
+  onRequestChanges: (d: MessageDraft, feedback: string) => void;
+  /** Open one of this chat's notes in the Notes tab. */
+  onOpenChatNote: (name: string) => void;
 };
 
 /**
@@ -401,7 +407,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
                     onPreview={setPreview}
                   />
                 ))}
-                {streaming && <StreamingView s={streaming} size={textSize} onJump={onJump} hasDoc={hasDoc} prep={prep} />}
+                {streaming && <StreamingView s={streaming} size={textSize} onJump={onJump} hasDoc={hasDoc} prep={prep} drafts={<Drafts {...props} list={streaming.drafts} busy />} />}
               </div>
             )}
           </>
@@ -623,6 +629,12 @@ function MessageView(
           </div>
         )}
         {m.quote && <QuoteChip q={m.quote} size={size} onJumpQuote={onJumpQuote} docName={docName} />}
+        {m.draftRef && (
+          <span className="flex items-center gap-1 text-[11px] font-medium text-violet-600 dark:text-violet-400">
+            <NotebookPen className="size-3.5" /> Changes to the draft for {m.draftRef.target}
+            {m.draftRef.revision > 1 ? ` (version ${m.draftRef.revision})` : ""}
+          </span>
+        )}
         {m.mode === "check" && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
             <GraduationCap className="size-3.5" /> My explanation — please check
@@ -644,14 +656,22 @@ function MessageView(
   }
   if (m.error) {
     return (
-      <div className="flex gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs whitespace-pre-wrap text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
-        <TriangleAlert className="size-4 shrink-0" />
-        <p className="min-w-0 break-words">{m.content}</p>
+      <div>
+        <div className="flex gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs whitespace-pre-wrap text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+          <TriangleAlert className="size-4 shrink-0" />
+          <p className="min-w-0 break-words">{m.content}</p>
+        </div>
+        {m.drafts?.length ? <Drafts {...props} list={m.drafts} busy={busy} /> : null}
       </div>
     );
   }
   if (!m.content.trim()) {
-    return <p className="text-xs text-zinc-400 italic">Stopped before answering.</p>;
+    return (
+      <div>
+        <p className="text-xs text-zinc-400 italic">{m.drafts?.length ? "" : "Stopped before answering."}</p>
+        {m.drafts?.length ? <Drafts {...props} list={m.drafts} busy={busy} /> : null}
+      </div>
+    );
   }
   const other = providers.find((p) => p.available && p.id !== (m.provider ?? "agy"));
   return (
@@ -659,6 +679,7 @@ function MessageView(
       <Markdown onJump={onJump} hasDoc={hasDoc} size={size}>
         {prep(m.content)}
       </Markdown>
+      {m.drafts?.length ? <Drafts {...props} list={m.drafts} busy={busy} /> : null}
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
         <ProviderTag id={m.provider ?? "agy"} label={label(m.provider)} model={m.model} modelLabel={m.modelLabel} effort={m.effort} />
         {m.stopped && <span>Stopped</span>}
@@ -778,12 +799,14 @@ function StreamingView({
   onJump,
   hasDoc,
   prep,
+  drafts,
 }: {
   s: Streaming;
   size: TextSize;
   onJump: Props["onJump"];
   hasDoc: Props["hasDoc"];
   prep: ViewProps["prep"];
+  drafts: React.ReactNode;
 }) {
   const active = s.tools.at(-1);
   const status = active?.state === "active" ? toolLabel(active) : s.text ? null : "Thinking…";
@@ -801,6 +824,30 @@ function StreamingView({
         </div>
       )}
       {!status && <span className="caret" />}
+      {drafts}
+    </div>
+  );
+}
+
+/** The note drafts of an answer. */
+function Drafts(props: Props & { list: MessageDraft[]; busy: boolean }) {
+  const { chat, list, busy, onJump, hasDoc, textSize, onDraftDecided, onRequestChanges, onOpenChatNote } = props;
+  return (
+    <div className="flex flex-col">
+      {list.map((d) => (
+        <DraftCard
+          key={d.id}
+          chat={chat}
+          d={d}
+          busy={busy}
+          onJump={onJump}
+          hasDoc={hasDoc}
+          textSize={textSize}
+          onDecided={onDraftDecided}
+          onRequestChanges={onRequestChanges}
+          onOpenNote={onOpenChatNote}
+        />
+      ))}
     </div>
   );
 }
@@ -850,6 +897,9 @@ function toolLabel(t: ToolEvent) {
   const own = t.name.match(/^(?:ydust\/|mcp__ydust__)(\w+)$/)?.[1];
   if (own === "search") return t.detail ? `Searching for “${t.detail}”…` : "Searching the documents…";
   if (own === "read_pages") return t.detail ? `Reading ${t.detail}…` : "Reading pages…";
+  if (own === "list_notes") return "Looking at your notes…";
+  if (own === "read_note") return t.detail ? `Reading your note ${t.detail}…` : "Reading your note…";
+  if (own === "write_note") return t.detail ? `Drafting ${t.detail}…` : "Drafting a note…";
   if (["read_file", "view_file", "Read"].includes(t.name)) return "Reading the document…";
   if (["grep_search", "Grep", "Glob"].includes(t.name)) return "Searching the document…";
   return `Using ${t.name.replace(/_/g, " ")}…`;

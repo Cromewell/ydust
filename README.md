@@ -39,7 +39,8 @@
 - **Explanation level**: Beginner, Student, Advanced or Exam prep.
 - **Second opinion**: under every answer, *Ask Claude* / *Ask Antigravity* asks the other assistant the same question and lets it check the first answer.
 - **Notes**: write your own Markdown notes next to the PDF, with formulas (`$x^2$`, `$$\int f$$`) and page links (`[p. 12](#page=12)`) that work in the preview. Every PDF and every folder has its own notes; they are plain `.md` files you can also open in any other editor. Notes save themselves as you type, and a note changed in another editor meanwhile is never overwritten without asking.
-- **Add to note**: select a passage → *Add to note* quotes it with its page link (at the cursor, if a note is open). *Insert into note* under an answer adds the question, the passage and the answer.
+- **Add to note**: select a passage → *Notes* → *Add to note* quotes it with its page link (at the cursor, if a note is open). *Insert into note* under an answer adds the question, the passage and the answer.
+- **The tutor writes into your notes, you decide**: ask for exercises, a summary or a cheat sheet "into a note" (or select a passage → *Notes* → *Write exercises* / *Summarize to note*). The assistant picks a fitting note or a new name, and you get a diff under the answer, like in git: *Accept* writes it and opens the note, *Request changes* gets a second version (the first stays one click away), *Discard* leaves no trace. Nothing is written without your click, and a note you changed meanwhile is never overwritten: the diff is shown again against your new text.
 - **Pinned**: pin answers to the *Pinned* tab and add a comment to each. Export notes, pinned answers or the whole chat as Markdown.
 - **Discussed passages**: passages you asked about are tinted in the PDF with a small bubble. Click it to jump to the answer; click a quote in the chat to jump to the passage.
 
@@ -146,11 +147,13 @@ To find the right places quickly, ydust gives the tutor a map of every document 
 
 - **Your files stay on your computer.** PDFs, extracted text, chats and notes are stored in the `library/` folder next to the app.
 - **But the AI runs in the cloud.** What you ask, and the parts of your documents the assistant reads, are sent to the provider of the CLI you use (Google for Antigravity, Anthropic for Claude), under your account and their terms. Don't use ydust for documents you may not share with them.
-- **The assistant can only read.** It can read the PDF's text (and, in a folder, the folder's other documents), nothing else on your computer. It cannot run commands, change files or browse the web.
-  - Both get ydust's own read-only document tools (`search`, `read_pages`, a small MCP server that can only read the documents of the current chat; which ones is decided by ydust, not by the model).
+- **The assistant reads your documents and notes.** It can read the PDF's text (and, in a folder, the folder's other documents) and the chat's notes, nothing else on your computer. It cannot run commands or browse the web.
+- **It can propose note drafts; nothing is saved until you accept the diff.** Its only way to write is ydust's `write_note` tool, which stores a draft for you to review. The CLIs' own write, command and web tools stay off.
+  - Both get ydust's own tools (`search`, `read_pages`, `list_notes`, `read_note`, `write_note`), a small MCP server limited to the current chat's documents and notes; which ones is decided by ydust, not by the model. `write_note` hands the draft to ydust with a token that is only valid while that answer runs; ydust checks the name, size and mode, and only accepts a "replace" of a note the assistant has just read.
   - Claude Code only gets its read-only tools (`Read`, `Grep`, `Glob`) besides that; no other MCP servers.
-  - Antigravity runs as a custom read-only agent whose only tool is `read_file`; writes, commands and URLs are additionally denied, and other MCP tools aren't approved.
-- **Notes** stay local too. They are in the chat's folder, which the assistant may read; it isn't pointed at them.
+  - Antigravity runs as a custom agent whose only built-in tool is `read_file`; writes, commands and URLs are additionally denied, and other MCP tools aren't approved.
+  - Tests check that Claude is never given `Write`, `Edit`, `Bash`, `WebFetch` or `WebSearch`, and that Antigravity's settings still deny writing, commands and URLs.
+- **Notes stay local** like everything else; the parts the assistant reads go to its provider, as above.
 - **No remote pictures.** Answers and notes never load pictures from the web (an image address could carry text out); a picture shows as a label instead.
 - **Local only.** The server listens on `127.0.0.1` and rejects requests from other websites, so a web page you visit can't use it through your browser. Keep it that way: the server drives an AI agent on your machine.
 
@@ -189,7 +192,8 @@ browser (React + pdf.js)  ──POST /api/…/ask──▶  Hono server (Node)  
 
 - **Text extraction** happens in the browser with pdf.js: every page goes to `document.txt` (hyphenated line breaks joined), the outline to `outline.txt`.
 - **Each question** runs one headless turn of the selected CLI in the chat's folder (`library/<doc-id>/`, or `library/folders/<folder-id>/` for a folder chat). The other documents of the folder are added read-only with `--add-dir`. Sessions are resumed per CLI (`agy --conversation`, `claude --resume`).
-- **Document tools**: for every question ydust starts a tiny MCP server (`server/mcp/search.ts`, stdio, no dependencies) limited to the chat's documents. `search(query, doc?)` uses the same forgiving matching as the in-app search and returns pages with excerpts (falling back to pages that contain all words); `read_pages(doc?, from, to?)` returns the exact text of up to 10 pages. Claude Code gets it via `--mcp-config` (only its two tools pre-approved), Antigravity via `.agents/mcp_config.json` in the chat's folder (approved as `mcp(ydust/search)`, `mcp(ydust/read_pages)`).
+- **ydust's tools**: for every question ydust starts a tiny MCP server (`server/mcp/search.ts`, stdio, no dependencies) limited to the chat's documents and notes. `search(query, doc?)` uses the same forgiving matching as the in-app search and returns pages with excerpts (falling back to pages that contain all words); `read_pages(doc?, from, to?)` returns the exact text of up to 10 pages (both only when a document has text). `list_notes()` and `read_note(name)` read the chat's notes. Claude Code gets the server via `--mcp-config` (only its tools pre-approved), Antigravity via `.agents/mcp_config.json` in the chat's folder (approved as `mcp(ydust/<tool>)`).
+- **Drafts**: `write_note(name, content, mode, summary)` (mode `create`, `append` or `replace`) never touches the note. The MCP server posts the draft to `POST /api/internal/drafts` with the answer's turn token (32 random bytes, valid only while that answer runs; requests from a browser, which carry `Origin` or `Sec-Fetch-Site`, are refused). ydust stores it as `notes/.drafts/<id>.json` with a hash of the note it was made against, streams it to the browser, and records it on the answer. Accepting checks that the note is still the version the diff was shown against (otherwise the card shows the new diff), writes it atomically and removes the draft. *Request changes* is a normal question that carries the draft; the next `write_note` for that note becomes version 2. At most 20 drafts per chat (200 kB each) are kept; *New chat* removes open drafts, never notes.
 - **Prompts and settings never go on the command line**: the prompt goes in on stdin, and JSON (settings, MCP config) as files in the chat's `.agents/` folder. That avoids command-line length limits and, on Windows, quoting problems with `.cmd` shims. CLIs are started with [cross-spawn](https://github.com/moxystudio/node-cross-spawn) (finds `.exe` / `.cmd` via `PATHEXT`), and stopping an answer ends the whole process tree (`taskkill /T` on Windows).
 - **The prompt** contains the selected passage, the full text of that page, paths of attached pictures, the answer language and level, and your question. The first turn adds the tutor rules (cite pages as `[p. N](#page=N)`, …) and, in a folder, the list of documents with short ids (`d7`), text files and outlines. Other documents are cited as `[Name, p. N](#doc=d7&page=N)`. When a folder changes, the next turn tells the assistant what is in it now.
 - **Switching assistants**: the other assistant gets the messages it hasn't seen yet as context.
@@ -208,7 +212,8 @@ agy --print= --input-format stream-json --output-format stream-json --disable-sl
 
 ```json
 { "permissions": {
-    "allow": ["read_file(<chat folder>)", "read_file(<other doc folders>)", "mcp(ydust/search)", "mcp(ydust/read_pages)"],
+    "allow": ["read_file(<chat folder>)", "read_file(<other doc folders>)", "mcp(ydust/search)", "mcp(ydust/read_pages)",
+              "mcp(ydust/list_notes)", "mcp(ydust/read_note)", "mcp(ydust/write_note)"],
     "deny": ["write_file(*)", "command(*)", "read_url(*)", "execute_url(*)"] } }
 ```
 
@@ -220,7 +225,7 @@ ydust writes the custom agent to `.agents/agents/ydust-tutor.md` and the documen
 claude --print --output-format stream-json --verbose --include-partial-messages \
     --permission-mode default --tools Read Grep Glob \
     --strict-mcp-config [--mcp-config .agents/claude-mcp.json] \
-    --allowedTools mcp__ydust__search mcp__ydust__read_pages \
+    --allowedTools mcp__ydust__search mcp__ydust__read_pages mcp__ydust__list_notes mcp__ydust__read_note mcp__ydust__write_note \
     [--add-dir <other doc folder> …] [--resume <session-id>] [--model opus|sonnet|haiku] [--effort <level>]
 ```
 
@@ -237,6 +242,7 @@ library/
 │   ├── meta.json         name, chat history, one session id per CLI
 │   ├── images/           pictures attached in this PDF's chat
 │   ├── notes/            your notes for this PDF, plain Markdown (summary.md, …)
+│   │   └── .drafts/      the assistant's drafts waiting for your review
 │   └── .agents/          written by ydust for the CLIs: Antigravity's read-only agent, settings and
 │                         document tools, Claude's MCP config
 ├── folders/<folder-id>/
@@ -251,6 +257,7 @@ library/
 
 - **Scanned PDFs** have no text layer: no text selection or search, and the tutor can't read them. Snipping works. OCR would help.
 - **Dark pages** invert pictures too, so photos look like negatives.
+- **Drafts** are accepted as a whole; accepting single hunks or editing a draft before accepting it would be nice. A chat writes only into its own notes (a folder chat into the folder's notes).
 - Ideas: flashcard export; approving tool use from the UI via `agy acp` (Agent Client Protocol).
 
 ## Disclaimer
