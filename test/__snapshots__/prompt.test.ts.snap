@@ -1,5 +1,17 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`buildPrompt > challenge on selected lines of a folder's note 1`] = `
+"Answer language: the language of my question.
+
+My note "course.md" (lines 2–3, the part I selected), with line numbers:
+<note name="course.md">
+2| b
+3| c
+</note>
+
+Act as an examiner who wants to find out whether I really understand what I wrote. Ask me 3 to 5 probing questions about this note: why things hold, counter-examples, edge cases, connections between ideas, what the documents add. Check the documents with \`search\` and \`read_pages\` so the questions are grounded. Number the questions and refer to the note where useful with a Markdown link of the exact form [L12](#note-line=12) (the line number from the note), followed by the words you refer to in quotes. Don't give the answers or hints yet: I'll answer in the chat."
+`;
+
 exports[`buildPrompt > check mode on a selected passage 1`] = `
 "I selected this passage on page 3:
 <selection>
@@ -201,6 +213,21 @@ I attached 2 images. Look at each of them with your file-reading tool:
 Answer language: the language of my question.
 
 My question: Why?"
+`;
+
+exports[`buildPrompt > review of a note: numbered lines, line links, pages, no rewriting 1`] = `
+"Answer language: German (Deutsch) (answer in it even if my question or the document is in another language).
+
+My note "summary.md", with line numbers:
+<note name="summary.md">
+1| # Limits
+2| A limit is unique.
+3| Every bounded sequence converges.
+</note>
+
+Review this note against the documents. Check every claim with \`search\` and \`read_pages\` instead of relying on memory. Tell me what is wrong or imprecise, what important points are missing, and briefly what is correct. For each finding, refer to the line of my note with a Markdown link of the exact form [L12](#note-line=12) (the line number from the note), followed by the words you refer to in quotes, and cite the page that supports or contradicts it. Most important findings first; be concise. Don't rewrite the note and don't call \`write_note\`: I'll ask for fixes separately.
+
+My additional instructions: Focus on definitions."
 `;
 
 exports[`buildPrompt > second opinion on another assistant's answer 1`] = `

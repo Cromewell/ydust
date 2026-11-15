@@ -4,7 +4,7 @@ import type { Chat, Message, Note, NoteOwner, ProviderInfo } from "./api";
 type DocName = (id: string) => string | undefined;
 
 /** In-app links "[p. 3](#page=3)", "[Script, p. 3](#doc=d2&page=3)" mean nothing outside ydust: keep them as text. */
-export const plainCitations = (md: string) => md.replace(/\[([^\]]+)\]\(#(?:doc=[\w-]+&)?page=\d+\)/g, "($1)");
+export const plainCitations = (md: string) => md.replace(/\[([^\]]+)\]\(#(?:(?:doc=[\w-]+&)?page|note-line)=\d+\)/g, "($1)");
 
 const quoteBlock = (m: Message, docName?: DocName) => {
   if (!m.quote) return "";
@@ -36,7 +36,12 @@ export function chatMarkdown(chat: Chat, providers: ProviderInfo[], docName?: Do
         out += `---\n\n_Second opinion:_\n\n`;
         continue;
       }
-      out += `---\n\n### ${m.mode === "check" ? "My explanation" : "Question"}\n\n${quoteBlock(m, docName)}${m.content}\n\n`;
+      const heading = m.noteRef
+        ? `${m.mode === "challenge-note" ? "Challenge on" : m.mode === "fix-note" ? "Fixes for" : "Review of"} ${m.noteRef.name}`
+        : m.mode === "check"
+          ? "My explanation"
+          : "Question";
+      out += `---\n\n### ${heading}\n\n${quoteBlock(m, docName)}${m.noteRef ? (m.noteRef.instructions ?? "") : m.content}\n\n`;
       if (m.images?.length) out += `_(${m.images.length} picture${m.images.length > 1 ? "s" : ""} attached)_\n\n`;
     } else if (!m.error && m.content.trim()) {
       out += `**${who(m, providers)}:**\n\n${plainCitations(m.content)}\n\n`;

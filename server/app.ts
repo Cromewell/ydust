@@ -11,6 +11,7 @@ import { ydustServer } from "./mcp/launch.ts";
 import { MAX_NOTE_BYTES, NoteError, deleteNote, listNotes, notesDir, readNote, renameNote, saveNote } from "./notes.ts";
 import { buildPrompt, scopeSignature, type DocRef, type Scope } from "./prompt.ts";
 import {
+  ASK_MODES,
   IMAGE_TYPES,
   LIBRARY_DIR,
   chatDir,
@@ -45,12 +46,15 @@ import {
   updateFolder,
   updateMeta,
   writeText,
+  type AskMode,
   type ChatKind,
   type DocMeta,
   type Message,
   type MessageDraft,
+  type NoteRef,
   type Quote,
 } from "./store.ts";
+import { noteNameProblem } from "../src/lib/noteNames.ts";
 
 const MAX_UPLOAD = 200 * 1024 * 1024;
 const MAX_IMAGE = 20 * 1024 * 1024;
@@ -483,10 +487,16 @@ function chatRoutes(kind: ChatKind, base: string) {
       secondOpinionOf?: string;
       /** "Request changes" to this draft: the question is the user's feedback. */
       draftId?: string;
+      /** review-note / challenge-note: one of this chat's notes, optionally just some lines. */
+      note?: { name?: unknown; lines?: unknown };
     }>();
     const { model, effort, language, level, secondOpinionOf, provider: providerId = "agy" } = body;
     let { question, quote, images } = body;
-    let mode = body.mode === "check" ? ("check" as const) : undefined;
+    let mode = ASK_MODES.includes(body.mode as AskMode) ? (body.mode as AskMode) : undefined;
+    let noteRef: NoteRef | undefined =
+      body.note && typeof body.note.name === "string"
+        ? { name: body.note.name, lines: body.note.lines as [number, number] | undefined, instructions: typeof question === "string" ? question.trim() || undefined : undefined }
+        : undefined;
     if (!isProviderId(providerId)) return c.json({ error: "unknown assistant" }, 400);
     const provider = PROVIDERS[providerId];
     const previous = running.get(key);
@@ -523,6 +533,7 @@ function chatRoutes(kind: ChatKind, base: string) {
       quote = asked.quote;
       images = asked.images;
       mode = asked.mode;
+      noteRef = asked.noteRef;
       const prev = chat.messages[i];
       shownAlready.add(prev.id).add(asked.id);
       otherAnswer = { by: prev.provider && isProviderId(prev.provider) ? PROVIDERS[prev.provider].label : "another assistant", content: prev.content };
@@ -536,6 +547,24 @@ function chatRoutes(kind: ChatKind, base: string) {
       cleanQuote = { text: quote.text.trim(), page: quote.page, doc: kind === "folder" ? from : undefined };
     }
     const quoteDocId = cleanQuote ? (cleanQuote.doc ?? id) : null;
+
+    // Review or challenge a note: ydust reads it (as it is now), the assistant gets it with line numbers.
+    let note: { name: string; content: string; lines?: [number, number] } | undefined;
+    if (mode === "review-note" || mode === "challenge-note" || mode === "fix-note") {
+      if (!noteRef || noteNameProblem(noteRef.name)) return c.json({ error: "Which note? (`note.name`)" }, 400);
+      const n = await readNote(kind, id, noteRef.name).catch(() => null);
+      if (!n) return c.json({ error: `There is no note named “${noteRef.name}” in this chat.` }, 404);
+      const total = n.content.split("\n").length;
+      const l = noteRef.lines;
+      const lines = Array.isArray(l) && l.length === 2 && l.every((x) => Number.isInteger(x)) && l[0] >= 1 && l[1] >= l[0] && l[0] <= total ? ([l[0], Math.min(l[1], total)] as [number, number]) : undefined;
+      noteRef = { name: n.name, lines, instructions: noteRef.instructions?.slice(0, 4000) };
+      note = { name: n.name, content: n.content, lines };
+      const what = lines ? `${lines[0] === lines[1] ? `line ${lines[0]}` : `lines ${lines[0]}–${lines[1]}`} of my note “${n.name}”` : `my note “${n.name}”`;
+      const ask = mode === "review-note" ? `Review ${what}.` : mode === "challenge-note" ? `Challenge me on ${what}.` : `Propose fixes for ${what}.`;
+      question = `${ask}${noteRef.instructions ? `\n\n${noteRef.instructions}` : ""}`;
+    } else {
+      noteRef = undefined;
+    }
 
     if (typeof question !== "string" || !question.trim()) return c.json({ error: "question is empty" }, 400);
     const imageIds = Array.isArray(images) ? [...new Set(images)] : [];
@@ -555,8 +584,10 @@ function chatRoutes(kind: ChatKind, base: string) {
     // ydust's search/read_pages tools over the chat's documents (that have text); the first is the default.
     const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile }));
     // …and the chat's notes; drafts come back here with this turn's token.
+    // A review or challenge only reads: no write_note in that turn (fixes are asked for separately).
     const token = randomBytes(32).toString("hex");
-    const { server: mcp, tools: mcpTools } = ydustServer(searchable, { dir: notesDir(kind, id), api: runtime.apiBase || undefined, token });
+    const readOnly = mode === "review-note" || mode === "challenge-note";
+    const { server: mcp, tools: mcpTools } = ydustServer(searchable, { dir: notesDir(kind, id), ...(readOnly ? {} : { api: runtime.apiBase || undefined, token }) });
 
     const controller = new AbortController();
     let finish!: () => void;
@@ -579,6 +610,7 @@ function chatRoutes(kind: ChatKind, base: string) {
         mode,
         secondOpinionOf: otherAnswer ? secondOpinionOf : undefined,
         draftRef: revision ? { id: revision.id, target: revision.target, revision: revision.revision } : undefined,
+        noteRef,
       });
       await updateChat(kind, id, (m) => void m.messages.push(userMsg));
       // Everything since this assistant's last answer (all of it, if it has no session here).
@@ -597,9 +629,11 @@ function chatRoutes(kind: ChatKind, base: string) {
         firstTurn: !sessionId,
         contextChanged: !!sessionId && told !== signature,
         tools: searchable.length > 0,
-        noteTools: mcpTools.includes("write_note") ? "write" : "read",
+        // The rules stay the same from turn to turn, even when one turn can't write.
+        noteTools: runtime.apiBase ? "write" : "read",
         toolsIntro: !!sessionId && (chat.toolsVersion?.[providerId] ?? 0) < TOOLS_VERSION,
         revision,
+        note: note && noteRef ? { ...note, instructions: noteRef.instructions } : undefined,
         // What the other assistant discussed meanwhile is handed over as context
         // (everything, if this assistant starts a new session).
         history: unseen.filter((m) => (sessionId ? answeredBy(m) !== providerId : true) && !shownAlready.has(m.id)),

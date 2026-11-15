@@ -4,7 +4,13 @@ import { appendBlock } from "./noteText";
 export { appendBlock, blockInsertion } from "./noteText";
 
 /** The note open in the editor, so text can go straight to its cursor (and its autosave). */
-export type OpenEditor = { owner: NoteOwner; name: string; insert: (block: string) => void };
+export type OpenEditor = {
+  owner: NoteOwner;
+  name: string;
+  insert: (block: string) => void;
+  /** Save what's typed now (e.g. before the assistant reads the note). */
+  flush: () => Promise<void>;
+};
 let openEditor: OpenEditor | null = null;
 export const noteEditor = {
   get: () => openEditor,

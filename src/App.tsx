@@ -23,7 +23,7 @@ import { PdfViewer, type Flash, type Mark, type PdfSelection, type SearchState, 
 import { SearchBar, type SearchHit } from "./components/SearchBar";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { Sidebar } from "./components/Sidebar";
-import { api, ask, type Chat, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
+import { api, ask, type AskMode, type Chat, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
 import { questionOf } from "./lib/export";
 import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
 import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
@@ -156,6 +156,8 @@ export default function App() {
   }, []);
   const [openNote, setOpenNote] = useState<OpenNote | null>(null);
   const [notesRefresh, setNotesRefresh] = useState(0);
+  /** A question to send once its chat is on screen (see reviewNote). */
+  const pendingSend = useRef<{ key: string; run: () => void } | null>(null);
   const [picker, setPicker] = useState<{ anchor: Anchor; title: string; block: (owner: NoteOwner) => string } | null>(null);
 
   const flash = useCallback((msg: string) => {
@@ -280,7 +282,16 @@ export default function App() {
     let cancelled = false;
     api
       .getChat(target)
-      .then((c) => !cancelled && setChat(c))
+      .then((c) => {
+        if (cancelled) return;
+        setChat(c);
+        // A question that had to switch to this chat first (reviewing the folder's note from the PDF's chat, …).
+        const p = pendingSend.current;
+        if (p && p.key === `${target.kind}:${target.id}`) {
+          pendingSend.current = null;
+          setTimeout(p.run, 0);
+        }
+      })
       .catch((e) => !cancelled && flash(`Could not load the chat: ${(e as Error).message}`));
     return () => {
       cancelled = true;
@@ -495,7 +506,7 @@ export default function App() {
       question: string,
       withQuote: Quote | null,
       withImages: Attachment[] = [],
-      opts: { mode?: "check"; secondOpinionOf?: string; via?: string; draft?: MessageDraft } = {},
+      opts: { mode?: AskMode; secondOpinionOf?: string; via?: string; draft?: MessageDraft; note?: { name: string; lines?: [number, number] } } = {},
     ) => {
       if (!target || abortRef.current) return;
       const t = target;
@@ -536,6 +547,7 @@ export default function App() {
         mode: opts.mode,
         secondOpinionOf: opts.secondOpinionOf,
         draftRef: opts.draft ? { id: opts.draft.id, target: opts.draft.target, revision: opts.draft.revision } : undefined,
+        noteRef: opts.note ? { name: opts.note.name, lines: opts.note.lines, instructions: question.trim() || undefined } : undefined,
         createdAt: new Date().toISOString(),
       });
       let partial = "";
@@ -554,6 +566,7 @@ export default function App() {
             mode: opts.mode,
             secondOpinionOf: opts.secondOpinionOf,
             draftId: opts.draft?.id,
+            note: opts.note,
           },
           {
             onUser: (m) => pushMessage(key, m),
@@ -624,12 +637,12 @@ export default function App() {
     [chat, docs],
   );
 
-  /** One of the chat's notes, in the Notes tab. */
+  /** One of the chat's notes, in the Notes tab (at a line). */
   const openChatNote = useCallback(
-    (name: string) => {
+    (name: string, line?: number) => {
       const owner = chat && noteOwners.find((o) => o.kind === chat.kind && o.id === chat.id);
       if (!owner) return;
-      setOpenNote({ owner, name });
+      setOpenNote({ owner, name, line, nonce: Date.now() });
       setPanelTab("notes");
       setShowChat(true);
     },
@@ -647,6 +660,29 @@ export default function App() {
     },
     [chat, openChatNote], // eslint-disable-line react-hooks/exhaustive-deps
   );
+  const sendRef = useRef(send);
+  sendRef.current = send;
+
+  /**
+   * Review a note, or be challenged on it, in the chat the note belongs to (so "Propose fixes"
+   * can draft into it): what's typed is saved first, then the chat switches if needed.
+   */
+  const reviewNote = useCallback(
+    async (owner: NoteOwner, name: string, mode: "review-note" | "challenge-note", lines?: [number, number]) => {
+      if (streaming) return flash("Wait until the current answer is finished.");
+      const open = noteEditor.get();
+      if (open && sameOwner(open.owner, owner) && open.name === name) await open.flush();
+      const run = () => void sendRef.current("", null, [], { mode, note: { name, lines } });
+      const key = `${owner.kind}:${owner.id}`;
+      if (key === targetKey) return run();
+      pendingSend.current = { key, run };
+      setScope(owner.kind);
+      store.set("scope", owner.kind);
+    },
+    [streaming, targetKey, flash],
+  );
+  const proposeFixes = useCallback((name: string) => void send("", null, [], { mode: "fix-note", note: { name } }), [send]);
+
   const updateMessage = useCallback(
     async (messageId: string, patch: { pinned?: boolean; note?: string }) => {
       if (!target) return;
@@ -1210,6 +1246,8 @@ export default function App() {
             onDraftDecided={draftDecided}
             onRequestChanges={(d, feedback) => void send(feedback, null, [], { draft: d })}
             onOpenChatNote={openChatNote}
+            onReviewNote={(o, n, m, l) => void reviewNote(o, n, m, l)}
+            onProposeFixes={proposeFixes}
             onPin={(mid, pinned) => void updateMessage(mid, { pinned })}
             onNote={(mid, note) => void updateMessage(mid, { note })}
             onLanguage={(l) => {

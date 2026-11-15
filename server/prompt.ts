@@ -1,6 +1,8 @@
-import type { Message, Quote } from "./store.ts";
+import type { AskMode, Message, Quote } from "./store.ts";
 
 const MAX_QUOTE = 8_000;
+/** How much of a note goes into the prompt; the assistant reads the rest with read_note. */
+export const MAX_NOTE_IN_PROMPT = 30_000;
 const MAX_PAGE = 12_000;
 
 /** Answer languages the UI offers (code → name the model understands). */
@@ -151,12 +153,14 @@ export function buildPrompt(opts: {
   docNames?: Map<string, string>;
   /** Key of LEVELS, or anything else for no explicit level. */
   level?: string;
-  /** "check": the question is my own explanation, to be checked. */
-  mode?: "check";
+  /** "check": the question is my own explanation, to be checked; review-note / challenge-note: see `note`. */
+  mode?: AskMode;
+  /** review-note / challenge-note: the note (as ydust read it), optionally just these lines. */
+  note?: { name: string; content: string; lines?: [number, number]; instructions?: string };
   /** Second opinion: the other assistant's answer to this same question. */
   otherAnswer?: { by: string; content: string };
 }) {
-  const { scope, question, quote, quoteDoc, pageText, images = [], language, firstTurn, contextChanged, tools, noteTools, toolsIntro, history = [], docNames, level, mode, otherAnswer, revision } = opts;
+  const { scope, question, quote, quoteDoc, pageText, images = [], language, firstTurn, contextChanged, tools, noteTools, toolsIntro, history = [], docNames, level, mode, otherAnswer, revision, note } = opts;
   const parts: string[] = [];
   const isFolder = scope.kind === "folder";
 
@@ -287,6 +291,20 @@ export function buildPrompt(opts: {
     return parts.join("\n\n");
   }
 
+  if (note && mode === "fix-note") {
+    parts.push(
+      `Propose fixes for the problems you found in my note "${note.name}" (see your review above): read it with \`read_note\`, then call \`write_note\` with mode "replace". ` +
+        `Change only what is needed, keep the rest of my text as it is, and don't paste the note into your answer: say briefly what you changed.` +
+        (note.instructions ? `\n\nMy additional instructions: ${note.instructions}` : ""),
+    );
+    return parts.join("\n\n");
+  }
+
+  if (note && (mode === "review-note" || mode === "challenge-note")) {
+    parts.push(...notePrompt(mode, note, isFolder));
+    return parts.join("\n\n");
+  }
+
   if (mode === "check") {
     parts.push(
       `I'm explaining ${quote ? "this passage" : "this"} in my own words to test my understanding. Check my explanation: say what is correct, what is wrong or imprecise, and what is missing. ` +
@@ -297,4 +315,53 @@ export function buildPrompt(opts: {
     parts.push(`My question: ${question}`);
   }
   return parts.join("\n\n");
+}
+
+/** "12| text" lines of a note (or of its selected lines), up to MAX_NOTE_IN_PROMPT characters. */
+export function numberedNote(content: string, lines?: [number, number]) {
+  const all = content.split("\n");
+  let [from, to] = lines ?? [1, all.length];
+  from = Math.max(1, Math.min(from, all.length));
+  to = Math.max(from, Math.min(to, all.length));
+  const width = String(to).length;
+  const out: string[] = [];
+  let size = 0;
+  let last = from - 1;
+  for (let n = from; n <= to; n++) {
+    const line = `${String(n).padStart(width)}| ${all[n - 1]}`;
+    if (out.length && size + line.length + 1 > MAX_NOTE_IN_PROMPT) break;
+    out.push(line);
+    size += line.length + 1;
+    last = n;
+  }
+  return { text: out.join("\n"), cut: last < to ? { from, shown: last, to } : null };
+}
+
+function notePrompt(mode: "review-note" | "challenge-note", note: NonNullable<Parameters<typeof buildPrompt>[0]["note"]>, isFolder: boolean) {
+  const { text, cut } = numberedNote(note.content, note.lines);
+  const part = note.lines ? ` (${note.lines[0] === note.lines[1] ? `line ${note.lines[0]}` : `lines ${note.lines[0]}–${note.lines[1]}`}, the part I selected)` : "";
+  const cite = isFolder ? "the document and page" : "the page";
+  const lineLink = `a Markdown link of the exact form [L12](#note-line=12) (the line number from the note), followed by the words you refer to in quotes`;
+  const parts = [
+    `My note "${note.name}"${part}, with line numbers:\n<note name="${note.name}">\n${text}\n</note>` +
+      (cut
+        ? `\n(Only lines ${cut.from}–${cut.shown} are shown here; ${note.lines ? `the part I selected ends at line ${cut.to}` : `the note has ${cut.to} lines`}. Read the rest with \`read_note\` "${note.name}".)`
+        : ""),
+  ];
+  if (mode === "review-note") {
+    parts.push(
+      `Review this note against the documents. Check every claim with \`search\` and \`read_pages\` instead of relying on memory. ` +
+        `Tell me what is wrong or imprecise, what important points are missing, and briefly what is correct. ` +
+        `For each finding, refer to the line of my note with ${lineLink}, and cite ${cite} that supports or contradicts it. ` +
+        `Most important findings first; be concise. Don't rewrite the note and don't call \`write_note\`: I'll ask for fixes separately.`,
+    );
+  } else {
+    parts.push(
+      `Act as an examiner who wants to find out whether I really understand what I wrote. Ask me 3 to 5 probing questions about this note: ` +
+        `why things hold, counter-examples, edge cases, connections between ideas, what the documents add. Check the documents with \`search\` and \`read_pages\` so the questions are grounded. ` +
+        `Number the questions and refer to the note where useful with ${lineLink}. Don't give the answers or hints yet: I'll answer in the chat.`,
+    );
+  }
+  if (note.instructions) parts.push(`My additional instructions: ${note.instructions}`);
+  return parts;
 }

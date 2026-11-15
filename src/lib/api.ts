@@ -1,6 +1,8 @@
 /** A selected passage; `doc` = the document it is from (set in folder chats). */
 export type Quote = { text: string; page: number; doc?: string };
 
+export type AskMode = "check" | "review-note" | "challenge-note" | "fix-note";
+
 /** A note draft the assistant proposed in an answer (see DraftCard). */
 export type MessageDraft = {
   id: string;
@@ -32,8 +34,10 @@ export type Message = {
   model?: string;
   modelLabel?: string;
   effort?: string;
-  /** User messages: "check" = my own explanation, to be checked. */
-  mode?: "check";
+  /** User messages: "check" = my own explanation, to be checked; review/challenge one of my notes. */
+  mode?: AskMode;
+  /** User messages (review-note, challenge-note): the note, lines, and extra instructions. */
+  noteRef?: { name: string; lines?: [number, number]; instructions?: string };
   /** User messages: a second opinion on that assistant message. */
   secondOpinionOf?: string;
   /** User messages: changes requested to this draft. */
@@ -223,7 +227,9 @@ export async function ask(
   body: {
     question: string;
     level?: string;
-    mode?: "check";
+    mode?: AskMode;
+    /** review-note / challenge-note: which of the chat's notes, optionally which lines. */
+    note?: { name: string; lines?: [number, number] };
     secondOpinionOf?: string;
     draftId?: string;
     quote?: Quote;

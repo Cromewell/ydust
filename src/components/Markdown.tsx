@@ -31,6 +31,7 @@ export const Markdown = memo(function Markdown({
   children,
   onJump,
   hasDoc,
+  onNoteLine,
   size = "s",
 }: {
   children: string;
@@ -38,6 +39,8 @@ export const Markdown = memo(function Markdown({
   onJump: (page: number, doc?: string, label?: string) => void;
   /** Whether a document alias exists (links to unknown documents render as text). */
   hasDoc?: (alias: string) => boolean;
+  /** "[L12](#note-line=12)" in a review of a note: show that line in the editor. */
+  onNoteLine?: (line: number) => void;
   size?: TextSize;
 }) {
   const components: Components = {
@@ -51,6 +54,20 @@ export const Markdown = memo(function Markdown({
       );
     },
     a({ href, children }) {
+      const noteLine = href?.match(/^#note-line=(\d+)$/);
+      if (noteLine) {
+        if (!onNoteLine) return <span>{children}</span>;
+        return (
+          <button
+            type="button"
+            onClick={() => onNoteLine(Number(noteLine[1]))}
+            className="mx-0.5 inline-flex items-center rounded-md bg-emerald-100 px-1.5 py-px align-baseline font-mono text-[0.8em] font-medium text-emerald-800 no-underline transition hover:bg-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:hover:bg-emerald-500/25"
+            title="Show this line of your note"
+          >
+            {children}
+          </button>
+        );
+      }
       const link = href?.match(/^#(?:doc=([\w-]+)&)?page=(\d+)$/);
       if (link && (!link[1] || hasDoc?.(link[1]))) {
         const [, doc, page] = link;

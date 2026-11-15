@@ -15,6 +15,7 @@ import {
   Pin,
   PinOff,
   Quote as QuoteIcon,
+  SearchCheck,
   Square,
   TriangleAlert,
   X,
@@ -94,8 +95,11 @@ type Props = {
   /** A draft was accepted (into `accepted`) or discarded; `removed`: it and its earlier versions. */
   onDraftDecided: (d: MessageDraft, outcome: { accepted?: string; removed: string[] }) => void;
   onRequestChanges: (d: MessageDraft, feedback: string) => void;
-  /** Open one of this chat's notes in the Notes tab. */
-  onOpenChatNote: (name: string) => void;
+  /** Open one of this chat's notes in the Notes tab (at a line). */
+  onOpenChatNote: (name: string, line?: number) => void;
+  onReviewNote: (owner: NoteOwner, name: string, mode: "review-note" | "challenge-note", lines?: [number, number]) => void;
+  /** Under a review: ask for the fixes as a draft. */
+  onProposeFixes: (noteName: string) => void;
 };
 
 /**
@@ -341,6 +345,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
             onJump={onJump}
             hasDoc={hasDoc}
             textSize={textSize}
+            onReview={props.onReviewNote}
           />
         </div>
       )}
@@ -593,7 +598,7 @@ function QuoteChip({ q, size, onJumpQuote, docName }: { q: Quote; size: TextSize
 function MessageView(
   props: ViewProps & { m: Message; next?: Message; flashing: boolean; busy: boolean },
 ) {
-  const { m, next, flashing, textSize: size, chat, providers, busy, label, onJump, hasDoc, docName, onJumpQuote, onPreview, onPin, onSecondOpinion, prep } = props;
+  const { m, next, flashing, textSize: size, chat, providers, busy, label, onJump, hasDoc, docName, onJumpQuote, onPreview, onPin, onSecondOpinion, prep, onCheckMode } = props;
 
   if (m.role === "user") {
     if (m.secondOpinionOf) {
@@ -640,7 +645,8 @@ function MessageView(
             <GraduationCap className="size-3.5" /> My explanation — please check
           </span>
         )}
-        <div
+        {m.noteRef && <NoteChip noteRef={m.noteRef} mode={m.mode} onOpen={(line) => props.onOpenChatNote(m.noteRef!.name, line)} />}
+        {(!m.noteRef || m.noteRef.instructions) && <div
           className={clsx(
             "rounded-2xl rounded-br-md px-3.5 py-2 whitespace-pre-wrap",
             m.mode === "check"
@@ -649,8 +655,8 @@ function MessageView(
             SIZE_CLASSES[size].text,
           )}
         >
-          {m.content}
-        </div>
+          {m.noteRef ? m.noteRef.instructions : m.content}
+        </div>}
       </div>
     );
   }
@@ -674,11 +680,35 @@ function MessageView(
     );
   }
   const other = providers.find((p) => p.available && p.id !== (m.provider ?? "agy"));
+  // An answer to a review or challenge of a note: its "[L12]" links show lines of that note.
+  const asked = questionOf(chat.messages, m);
+  const reviewed = asked?.noteRef && (asked.mode === "review-note" || asked.mode === "challenge-note") ? asked : undefined;
   return (
     <div className="group">
-      <Markdown onJump={onJump} hasDoc={hasDoc} size={size}>
+      <Markdown onJump={onJump} hasDoc={hasDoc} size={size} onNoteLine={reviewed ? (line) => props.onOpenChatNote(reviewed.noteRef!.name, line) : undefined}>
         {prep(m.content)}
       </Markdown>
+      {reviewed && !busy && !m.stopped && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {reviewed.mode === "review-note" ? (
+            <button
+              onClick={() => props.onProposeFixes(reviewed.noteRef!.name)}
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:border-emerald-500/30 dark:text-emerald-300 dark:hover:bg-emerald-500/10"
+              title="The assistant drafts the corrections; you review them as a diff"
+            >
+              <NotebookPen className="size-3.5" /> Propose fixes
+            </button>
+          ) : (
+            <button
+              onClick={() => onCheckMode(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:border-emerald-500/30 dark:text-emerald-300 dark:hover:bg-emerald-500/10"
+              title="Answer in your own words: you get feedback and hints, not the solution"
+            >
+              <GraduationCap className="size-3.5" /> Answer these
+            </button>
+          )}
+        </div>
+      )}
       {m.drafts?.length ? <Drafts {...props} list={m.drafts} busy={busy} /> : null}
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
         <ProviderTag id={m.provider ?? "agy"} label={label(m.provider)} model={m.model} modelLabel={m.modelLabel} effort={m.effort} />
@@ -903,6 +933,25 @@ function toolLabel(t: ToolEvent) {
   if (["read_file", "view_file", "Read"].includes(t.name)) return "Reading the document…";
   if (["grep_search", "Grep", "Glob"].includes(t.name)) return "Searching the document…";
   return `Using ${t.name.replace(/_/g, " ")}…`;
+}
+
+/** "Review of summary.md (lines 3–8)" on a question about a note. */
+function NoteChip({ noteRef, mode, onOpen }: { noteRef: NonNullable<Message["noteRef"]>; mode?: Message["mode"]; onOpen: (line?: number) => void }) {
+  const Icon = mode === "challenge-note" ? GraduationCap : mode === "fix-note" ? NotebookPen : SearchCheck;
+  const lines = noteRef.lines ? ` (${noteRef.lines[0] === noteRef.lines[1] ? `line ${noteRef.lines[0]}` : `lines ${noteRef.lines[0]}–${noteRef.lines[1]}`})` : "";
+  return (
+    <button
+      onClick={() => onOpen(noteRef.lines?.[0])}
+      className="flex max-w-full items-center gap-1.5 rounded-xl border-l-2 border-emerald-400 bg-emerald-50/70 px-3 py-1.5 text-left text-xs font-medium text-emerald-800 transition hover:bg-emerald-50 dark:bg-emerald-500/10 dark:text-emerald-300"
+      title="Open the note"
+    >
+      <Icon className="size-3.5 shrink-0" />
+      <span className="truncate">
+        {mode === "challenge-note" ? "Challenge me on" : mode === "fix-note" ? "Fixes for" : "Review of"} {noteRef.name}
+        {lines}
+      </span>
+    </button>
+  );
 }
 
 /** "Insert into note": opens the note picker below the button. */

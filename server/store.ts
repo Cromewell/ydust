@@ -9,6 +9,10 @@ const STATE_PATH = path.join(LIBRARY_DIR, "state.json");
 /** A selected passage. `doc` = the document it is from (always set in folder chats). */
 export type Quote = { text: string; page: number; doc?: string };
 
+export const ASK_MODES = ["check", "review-note", "challenge-note", "fix-note"] as const;
+export type AskMode = (typeof ASK_MODES)[number];
+export type NoteRef = { name: string; lines?: [number, number]; instructions?: string };
+
 /** A draft the assistant proposed in an answer (the content lives in notes/.drafts/ until decided). */
 export type MessageDraft = {
   id: string;
@@ -37,8 +41,14 @@ export type Message = {
   modelLabel?: string;
   /** Reasoning effort used (chosen, or the CLI's configured default). */
   effort?: string;
-  /** User messages: "check" = I explain it in my own words, the assistant checks it. */
-  mode?: "check";
+  /**
+   * User messages: "check" = I explain it in my own words, the assistant checks it;
+   * "review-note" / "challenge-note" = check my note against the documents / quiz me on it;
+   * "fix-note" = draft the fixes the review found (as a replace draft).
+   */
+  mode?: AskMode;
+  /** User messages (review-note, challenge-note): which note, which lines, and my extra instructions. */
+  noteRef?: NoteRef;
   /** User messages: asks for a second opinion on this assistant message. */
   secondOpinionOf?: string;
   /** User messages: asks for changes to this draft ("Request changes"). */
