@@ -87,6 +87,28 @@ function indexLayer(layer: Element): LayerIndex {
   return index;
 }
 
+/**
+ * Which match of `query` in a text layer a selection is (0 = the first): the first match
+ * that starts at or after where the selection starts. For highlights of a text that occurs
+ * more than once on a page.
+ */
+export function occurrenceAt(layer: Element, query: string, selection: Range): number {
+  const q = fold(query);
+  if (!q) return 0;
+  const before = document.createRange();
+  before.setStart(layer, 0);
+  try {
+    before.setEnd(selection.startContainer, selection.startOffset);
+  } catch {
+    return 0;
+  }
+  const start = fold(before.toString()).length;
+  const { text } = indexLayer(layer);
+  let n = 0;
+  for (let i = text.indexOf(q); i !== -1 && i < start; i = text.indexOf(q, i + q.length)) n++;
+  return n;
+}
+
 /** All occurrences of `query` inside a text layer, as DOM Ranges. */
 export function findInLayer(layer: Element, query: string, limit = 500): Range[] {
   const q = fold(query);

@@ -1,6 +1,8 @@
 import { BookOpenText, ChevronDown, GraduationCap, HelpCircle, ListChecks, NotebookPen, PenLine, Quote, Sparkles } from "lucide-react";
 import clsx from "clsx";
 import { useState } from "react";
+import { HL_COLORS, type HlColor } from "../lib/api";
+import { HL_STYLE } from "../lib/highlightColors";
 import type { Anchor } from "./NotePicker";
 import type { PdfSelection } from "./PdfViewer";
 
@@ -56,6 +58,8 @@ function Menu({
   onCheck,
   onAddToNote,
   openNote,
+  onHighlight,
+  lastColor,
 }: {
   selection: PdfSelection;
   onAsk: () => void;
@@ -66,6 +70,10 @@ function Menu({
   onAddToNote: (at: Anchor) => void;
   /** Name of the note open in the editor: the passage goes straight there. */
   openNote: string | null;
+  /** Mark the passage in this colour (null: the PDF has no text layer here). */
+  onHighlight: ((color: HlColor) => void) | null;
+  /** The colour used last (ringed). */
+  lastColor: HlColor;
 }) {
   const [noteMenu, setNoteMenu] = useState(false);
   // Show the menu where the user finished: below the end of a forward selection,
@@ -75,7 +83,7 @@ function Menu({
   const fitsAbove = end.top - MENU_H - 8 >= 0;
   const fitsBelow = end.bottom + MENU_H + 8 <= window.innerHeight;
   const above = backward ? fitsAbove || !fitsBelow : !fitsBelow && fitsAbove;
-  const left = Math.min(Math.max(end.left, 280), window.innerWidth - 280);
+  const left = Math.min(Math.max(end.left, 340), window.innerWidth - 340);
   // Clamp so the menu stays on screen even when neither side has room.
   const top = above ? Math.max(MENU_H + 8, end.top - 8) : Math.min(window.innerHeight - MENU_H - 8, end.bottom + 8);
 
@@ -88,6 +96,27 @@ function Menu({
       className="animate-pop fixed z-50 flex items-center gap-0.5 rounded-xl whitespace-nowrap border border-zinc-200/80 bg-white/95 p-1 shadow-xl shadow-zinc-900/10 backdrop-blur dark:border-zinc-700/80 dark:bg-zinc-900/95"
       style={{ left, top, transform: `translate(-50%, ${above ? "-100%" : "0"})` }}
     >
+      {onHighlight && (
+        <>
+          <div className="flex items-center gap-1 px-1" role="group" aria-label="Highlight">
+            {HL_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => onHighlight(c)}
+                aria-label={`Highlight ${HL_STYLE[c].label.toLowerCase()}`}
+                title={`Highlight in ${HL_STYLE[c].label.toLowerCase()}`}
+                className={clsx(
+                  "size-4 rounded-full border border-black/10 transition hover:scale-125 dark:border-white/20",
+                  c === lastColor && "ring-2 ring-zinc-400 ring-offset-1 ring-offset-white dark:ring-zinc-500 dark:ring-offset-zinc-900",
+                )}
+                style={{ backgroundColor: HL_STYLE[c].dot }}
+              />
+            ))}
+          </div>
+          <span className="mx-0.5 h-5 w-px bg-zinc-200 dark:bg-zinc-700" />
+        </>
+      )}
       <button
         type="button"
         onClick={onAsk}

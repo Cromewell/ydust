@@ -90,7 +90,8 @@ function describeDoc(d: DocRef, withOutline: boolean) {
 const TOOLS_RULE =
   `- You have two document tools: \`search\` (forgiving full-text search over the documents: accents, ß/ss, case and hyphenation don't matter; returns pages with excerpts) ` +
   `and \`read_pages\` (the exact text of a page range; page numbers are the PDF's). Use \`search\` to find where something is discussed and \`read_pages\` to read those pages, ` +
-  `instead of opening the large text files. Search for short terms (one or two words), and try synonyms or other word forms if nothing is found.`;
+  `instead of opening the large text files. Search for short terms (one or two words), and try synonyms or other word forms if nothing is found. ` +
+  `\`list_highlights\` lists the passages I marked in colour, with my comments (when I refer to "what I marked" or a colour).`;
 
 /** The notes tools; "write" adds write_note (drafts the user reviews). */
 function notesRule(access: "read" | "write") {

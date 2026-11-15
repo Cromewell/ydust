@@ -1,4 +1,4 @@
-import type { Chat, Message, Note, NoteOwner, ProviderInfo } from "./api";
+import type { Chat, Highlight, Message, Note, NoteOwner, ProviderInfo } from "./api";
 
 /** Resolves a document id to its name (quotes in folder chats). */
 type DocName = (id: string) => string | undefined;
@@ -75,6 +75,24 @@ export function noteFilesMarkdown(groups: { owner: NoteOwner; notes: Note[] }[])
       out += `---\n\n_${owner.kind === "folder" ? `Folder “${owner.name}”` : owner.name} · ${n.name}_\n\n${plainCitations(n.content).trim()}\n\n`;
     }
   }
+  return out;
+}
+
+const COLOR_NAME: Record<Highlight["color"], string> = { yellow: "Yellow", green: "Green", blue: "Blue", pink: "Pink", orange: "Orange" };
+
+/** A document's highlights as Markdown, by page. */
+export function highlightsMarkdown(docName: string, list: Highlight[]) {
+  let out = `# ${docName} — Highlights\n\n_Exported from ydust on ${new Date().toLocaleString()}_\n`;
+  let page = 0;
+  for (const h of [...list].sort((a, b) => a.page - b.page)) {
+    if (h.page !== page) {
+      page = h.page;
+      out += `\n## Page ${page}\n\n`;
+    }
+    out += `- **${COLOR_NAME[h.color]}:** ${h.text}\n`;
+    if (h.comment) out += `  _${h.comment.replace(/\s+/g, " ")}_\n`;
+  }
+  if (!list.length) out += "\n_No highlights._\n";
   return out;
 }
 

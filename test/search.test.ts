@@ -165,7 +165,7 @@ describe("MCP server over stdio", () => {
       child.stdin!.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
       const list = await call("tools/list");
-      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "read_pages"]);
+      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "read_pages", "list_highlights"]);
 
       const hit = await call("tools/call", { name: "search", arguments: { query: "Rolle" } });
       expect(hit.result.isError).toBeUndefined();

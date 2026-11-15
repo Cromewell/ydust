@@ -1,13 +1,18 @@
 import clsx from "clsx";
-import { MessageSquareText } from "lucide-react";
+import { MessageSquareText, StickyNote } from "lucide-react";
+import type { Highlight } from "../lib/api";
+import { HL_STYLE, barColor } from "../lib/highlightColors";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { cleanSelection, pdfjs, type PageRect, type PDFDocumentProxy } from "../lib/pdf";
 import { rangeHighlights, selectionEnd, selectionHighlights, type HighlightRect } from "../lib/selection";
-import { findInLayer } from "../lib/textMatch";
+import { findInLayer, occurrenceAt } from "../lib/textMatch";
 import { isTextSpan, lineOf, positionAt, posTop, wordAt, type TextPos } from "../lib/textSelect";
 
-/** `end` is the caret rect where the user finished selecting; `backward` if they dragged upwards. */
-export type PdfSelection = { text: string; page: number; end: DOMRect; backward: boolean };
+/**
+ * `end` is the caret rect where the user finished selecting; `backward` if they dragged upwards;
+ * `occurrence`: which match of `text` on the page it is (for highlights).
+ */
+export type PdfSelection = { text: string; page: number; occurrence: number; end: DOMRect; backward: boolean };
 
 type Size = { width: number; height: number };
 
@@ -21,6 +26,10 @@ export type SearchState = { query: string; current: { page: number; n: number } 
 export type Flash = { page: number; text: string; nonce: number };
 
 const EMPTY_MARKS: Mark[] = [];
+const EMPTY_HIGHLIGHTS: Highlight[] = [];
+
+/** Where a highlight was clicked (to open its menu there). */
+export type HighlightClick = { id: string; left: number; top: number };
 
 type Props = {
   pdf: PDFDocumentProxy;
@@ -43,6 +52,9 @@ type Props = {
   tint?: string | null;
   /** Dark pages: darken the area around them too. */
   darkPages?: boolean;
+  /** The user's coloured highlights, and what happens when one is clicked. */
+  userHighlights?: Highlight[];
+  onHighlightClick?: (click: HighlightClick) => void;
 };
 
 const GAP = 16;
@@ -65,6 +77,8 @@ export function PdfViewer({
   pageFilter,
   tint = null,
   darkPages = false,
+  userHighlights = EMPTY_HIGHLIGHTS,
+  onHighlightClick,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [sizes, setSizes] = useState<Size[] | null>(null);
@@ -166,7 +180,9 @@ export function PdfViewer({
       const text = cleanSelection(sel && !sel.isCollapsed ? sel.toString() : range.toString());
       if (!sel || !pageEl || !text) return onSelection(null);
       const { rect, backward } = selectionEnd(sel, range);
-      onSelection({ text, page: Number(pageEl.dataset.page), end: rect, backward });
+      const layer = pageEl.querySelector(".textLayer");
+      const occurrence = layer ? occurrenceAt(layer, text, range) : 0;
+      onSelection({ text, page: Number(pageEl.dataset.page), occurrence, end: rect, backward });
     },
     [onSelection],
   );
@@ -326,6 +342,11 @@ export function PdfViewer({
     for (const mark of marks) m.set(mark.page, [...(m.get(mark.page) ?? []), mark]);
     return m;
   }, [marks]);
+  const highlightsByPage = useMemo(() => {
+    const m = new Map<number, Highlight[]>();
+    for (const h of userHighlights) m.set(h.page, [...(m.get(h.page) ?? []), h]);
+    return m;
+  }, [userHighlights]);
 
   /** Bring a page into view if it's off-screen (it then renders and reveals the exact spot). */
   const ensurePageVisible = useCallback(
@@ -378,11 +399,14 @@ export function PdfViewer({
               searchCurrent={search?.current?.page === i + 1 ? search.current.n : -1}
               searchNonce={search?.current?.page === i + 1 ? search.nonce : 0}
               marks={marksByPage.get(i + 1) ?? EMPTY_MARKS}
+              userHighlights={highlightsByPage.get(i + 1) ?? EMPTY_HIGHLIGHTS}
+              onHighlightClick={onHighlightClick}
               flash={flash?.page === i + 1 ? flash : null}
               onReveal={reveal}
               onMarkClick={onMarkClick}
               pageFilter={pageFilter}
               tint={tint}
+              darkPages={darkPages}
             />
           ))}
         </div>
@@ -404,11 +428,14 @@ const Page = memo(function Page({
   searchCurrent,
   searchNonce,
   marks,
+  userHighlights,
+  onHighlightClick,
   flash,
   onReveal,
   onMarkClick,
   pageFilter,
   tint,
+  darkPages,
 }: {
   pdf: PDFDocumentProxy;
   num: number;
@@ -423,11 +450,14 @@ const Page = memo(function Page({
   searchCurrent: number;
   searchNonce: number;
   marks: Mark[];
+  userHighlights: Highlight[];
+  onHighlightClick?: (click: HighlightClick) => void;
   flash: Flash | null;
   onReveal: (page: number, top: number, height: number) => void;
   onMarkClick: (messageId: string) => void;
   pageFilter?: string;
   tint: string | null;
+  darkPages: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const canvasHost = useRef<HTMLDivElement>(null);
@@ -438,6 +468,7 @@ const Page = memo(function Page({
   const [hitBars, setHitBars] = useState<HighlightRect[][]>([]);
   const [markBars, setMarkBars] = useState<{ id: string; bars: HighlightRect[] }[]>([]);
   const [flashBars, setFlashBars] = useState<HighlightRect[] | null>(null);
+  const [userBars, setUserBars] = useState<{ h: Highlight; bars: HighlightRect[] }[]>([]);
   const revealed = useRef("");
 
   const layerEl = () => textHost.current?.querySelector<HTMLElement>(".textLayer") ?? null;
@@ -472,6 +503,35 @@ const Page = memo(function Page({
         .filter((m) => m.bars.length),
     );
   }, [marks, textVersion, scale]);
+
+  // The user's highlights: the n-th match of their text on this page (or the first, if the text changed).
+  useLayoutEffect(() => {
+    const layer = layerEl();
+    const pageEl = ref.current;
+    if (!layer || !pageEl || !userHighlights.length) return setUserBars([]);
+    setUserBars(
+      userHighlights
+        .map((h) => {
+          const ranges = findInLayer(layer, h.text, h.occurrence + 1);
+          const range = ranges[h.occurrence] ?? ranges[0] ?? findInLayer(layer, h.text.slice(0, 80), 1)[0];
+          return { h, bars: range ? rangeHighlights(range, pageEl, layer) : [] };
+        })
+        .filter((x) => x.bars.length),
+    );
+  }, [userHighlights, textVersion, scale]);
+
+  /** A click (not a drag) on a highlight opens its menu. */
+  const onPageClick = (e: React.MouseEvent) => {
+    if (!onHighlightClick || !userBars.length || e.detail !== 1) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const r = ref.current!.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const y = e.clientY - r.top;
+    // The most recent highlight on top.
+    const hit = [...userBars].reverse().find(({ bars }) => bars.some((b) => x >= b.left && x <= b.left + b.width && y >= b.top && y <= b.top + b.height));
+    if (hit) onHighlightClick({ id: hit.h.id, left: e.clientX, top: e.clientY + 14 });
+  };
 
   // Flash a passage (clicked quote in the chat).
   useLayoutEffect(() => {
@@ -575,6 +635,7 @@ const Page = memo(function Page({
     <div
       ref={ref}
       data-page={num}
+      onClick={onPageClick}
       className="pdf-page relative isolate shrink-0 overflow-hidden rounded-sm shadow-[0_1px_3px_rgba(0,0,0,0.12),0_8px_24px_-12px_rgba(0,0,0,0.25)]"
       style={
         {
@@ -590,6 +651,13 @@ const Page = memo(function Page({
           multiply highlights keep working). The text layer stays outside, unfiltered. */}
       <div className="absolute inset-0 bg-white" style={pageFilter ? { filter: pageFilter } : undefined}>
       <div ref={canvasHost} className="absolute inset-0 select-none [&>canvas]:h-full! [&>canvas]:w-full!" />
+      {userBars.length > 0 && (
+        <div className="pointer-events-none absolute inset-0 select-none mix-blend-multiply">
+          {userBars.flatMap(({ h, bars }) =>
+            bars.map((b, i) => <div key={`${h.id}-${i}`} data-highlight={h.color} className="absolute rounded-[2px]" style={{ ...b, backgroundColor: barColor(h.color, { dark: darkPages, tinted: !!tint }) }} />),
+          )}
+        </div>
+      )}
       {(markBars.length > 0 || hitBars.length > 0 || flashBars) && (
         // Same trick as the selection: opaque colours + multiply keep the text crisp.
         <div className="pointer-events-none absolute inset-0 select-none mix-blend-multiply">
@@ -632,6 +700,24 @@ const Page = memo(function Page({
           <MessageSquareText className="size-3" />
         </button>
       ))}
+      {userBars
+        .filter(({ h }) => h.comment)
+        .map(({ h, bars }) => (
+          <button
+            key={`c-${h.id}`}
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onHighlightClick?.({ id: h.id, left: e.clientX, top: e.clientY + 14 });
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            title={h.comment}
+            className="absolute left-1 z-10 flex size-4 items-center justify-center rounded-full text-white shadow-sm transition hover:scale-110"
+            style={{ top: bars[0].top + bars[0].height / 2 - 8, backgroundColor: HL_STYLE[h.color].dot }}
+          >
+            <StickyNote className="size-2.5" />
+          </button>
+        ))}
       {snipping && <SnipOverlay scale={scale} onSnip={(r) => onSnip(num, r)} />}
       <span className="pointer-events-none absolute right-2 bottom-1.5 text-[10px] font-medium text-zinc-400 select-none">
         {num}

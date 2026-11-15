@@ -8,11 +8,14 @@ export function OutlinePanel({
   page,
   onJump,
   onClose,
+  header,
 }: {
   pdf: PDFDocumentProxy;
   page: number;
   onJump: (page: number) => void;
   onClose: () => void;
+  /** Replaces the default header (e.g. Contents | Highlights tabs). */
+  header?: React.ReactNode;
 }) {
   const [nodes, setNodes] = useState<Node[] | null>(null);
   const [open, setOpen] = useState<Set<string>>(new Set());
@@ -106,13 +109,15 @@ export function OutlinePanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-zinc-50 dark:bg-zinc-950">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-zinc-200 px-3 dark:border-zinc-800">
-        <ListTree className="size-4 text-zinc-400" />
-        <span className="text-xs font-semibold tracking-wide text-zinc-500 uppercase">Contents</span>
-        <button onClick={onClose} className="icon-btn ml-auto size-7" title="Close contents">
-          <X className="size-4" />
-        </button>
-      </div>
+      {header ?? (
+        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-zinc-200 px-3 dark:border-zinc-800">
+          <ListTree className="size-4 text-zinc-400" />
+          <span className="text-xs font-semibold tracking-wide text-zinc-500 uppercase">Contents</span>
+          <button onClick={onClose} className="icon-btn ml-auto size-7" title="Close contents">
+            <X className="size-4" />
+          </button>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {nodes === null ? (
           <div className="flex justify-center p-6 text-zinc-400">

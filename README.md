@@ -43,6 +43,7 @@
 - **The tutor writes into your notes, you decide**: ask for exercises, a summary or a cheat sheet "into a note" (or select a passage → *Notes* → *Write exercises* / *Summarize to note*). The assistant picks a fitting note or a new name, and you get a diff under the answer, like in git: *Accept* writes it and opens the note, *Request changes* gets a second version (the first stays one click away), *Discard* leaves no trace. Nothing is written without your click, and a note you changed meanwhile is never overwritten: the diff is shown again against your new text.
 - **Review / Challenge your notes**: in the note editor, *Review* sends the note (or the lines you selected) to the assistant you have chosen. *Review* checks it against the documents: what is wrong, imprecise or missing, each finding with the page and a link to the line of your note (`L12`, click it to jump there). *Propose fixes* under a review drafts the corrections, which you accept as a diff like any draft. *Challenge me* asks 3 to 5 probing questions instead, without answers; *Answer these* lets you reply in *Check me* mode. A folder's note is reviewed in the folder chat.
 - **Pinned**: pin answers to the *Pinned* tab and add a comment to each. Export notes, pinned answers or the whole chat as Markdown.
+- **Highlights in five colours**: select text and click a coloured dot to mark it, without asking anything (the colour you used last is ringed). Click a highlight to change its colour, add a comment, *Ask about it*, *Add to note* or delete it. The *Highlights* list next to the table of contents shows them by page, filters by colour, jumps to each one, exports them as Markdown or copies them into a note. Ask the tutor about them too, e.g. "quiz me on what I marked in green". Highlights stay put when you zoom, switch to dark pages or reopen the PDF.
 - **Discussed passages**: passages you asked about are tinted in the PDF with a small bubble. Click it to jump to the answer; click a quote in the chat to jump to the passage.
 
 **Study a whole course**
@@ -150,7 +151,7 @@ To find the right places quickly, ydust gives the tutor a map of every document 
 - **But the AI runs in the cloud.** What you ask, and the parts of your documents the assistant reads, are sent to the provider of the CLI you use (Google for Antigravity, Anthropic for Claude), under your account and their terms. Don't use ydust for documents you may not share with them.
 - **The assistant reads your documents and notes.** It can read the PDF's text (and, in a folder, the folder's other documents) and the chat's notes, nothing else on your computer. It cannot run commands or browse the web.
 - **It can propose note drafts; nothing is saved until you accept the diff.** Its only way to write is ydust's `write_note` tool, which stores a draft for you to review. The CLIs' own write, command and web tools stay off.
-  - Both get ydust's own tools (`search`, `read_pages`, `list_notes`, `read_note`, `write_note`), a small MCP server limited to the current chat's documents and notes; which ones is decided by ydust, not by the model. `write_note` hands the draft to ydust with a token that is only valid while that answer runs; ydust checks the name, size and mode, and only accepts a "replace" of a note the assistant has just read.
+  - Both get ydust's own tools (`search`, `read_pages`, `list_highlights`, `list_notes`, `read_note`, `write_note`), a small MCP server limited to the current chat's documents and notes; which ones is decided by ydust, not by the model. `write_note` hands the draft to ydust with a token that is only valid while that answer runs; ydust checks the name, size and mode, and only accepts a "replace" of a note the assistant has just read.
   - Claude Code only gets its read-only tools (`Read`, `Grep`, `Glob`) besides that; no other MCP servers.
   - Antigravity runs as a custom agent whose only built-in tool is `read_file`; writes, commands and URLs are additionally denied, and other MCP tools aren't approved.
   - Tests check that Claude is never given `Write`, `Edit`, `Bash`, `WebFetch` or `WebSearch`, and that Antigravity's settings still deny writing, commands and URLs.
@@ -193,12 +194,13 @@ browser (React + pdf.js)  ──POST /api/…/ask──▶  Hono server (Node)  
 
 - **Text extraction** happens in the browser with pdf.js: every page goes to `document.txt` (hyphenated line breaks joined), the outline to `outline.txt`.
 - **Each question** runs one headless turn of the selected CLI in the chat's folder (`library/<doc-id>/`, or `library/folders/<folder-id>/` for a folder chat). The other documents of the folder are added read-only with `--add-dir`. Sessions are resumed per CLI (`agy --conversation`, `claude --resume`).
-- **ydust's tools**: for every question ydust starts a tiny MCP server (`server/mcp/search.ts`, stdio, no dependencies) limited to the chat's documents and notes. `search(query, doc?)` uses the same forgiving matching as the in-app search and returns pages with excerpts (falling back to pages that contain all words); `read_pages(doc?, from, to?)` returns the exact text of up to 10 pages (both only when a document has text). `list_notes()` and `read_note(name)` read the chat's notes. Claude Code gets the server via `--mcp-config` (only its tools pre-approved), Antigravity via `.agents/mcp_config.json` in the chat's folder (approved as `mcp(ydust/<tool>)`).
+- **ydust's tools**: for every question ydust starts a tiny MCP server (`server/mcp/search.ts`, stdio, no dependencies) limited to the chat's documents and notes. `search(query, doc?)` uses the same forgiving matching as the in-app search and returns pages with excerpts (falling back to pages that contain all words); `read_pages(doc?, from, to?)` returns the exact text of up to 10 pages; `list_highlights(doc?, color?)` lists the user's highlights with their comments (these three only when a document has text). `list_notes()` and `read_note(name)` read the chat's notes. Claude Code gets the server via `--mcp-config` (only its tools pre-approved), Antigravity via `.agents/mcp_config.json` in the chat's folder (approved as `mcp(ydust/<tool>)`).
 - **Drafts**: `write_note(name, content, mode, summary)` (mode `create`, `append` or `replace`) never touches the note. The MCP server posts the draft to `POST /api/internal/drafts` with the answer's turn token (32 random bytes, valid only while that answer runs; requests from a browser, which carry `Origin` or `Sec-Fetch-Site`, are refused). ydust stores it as `notes/.drafts/<id>.json` with a hash of the note it was made against, streams it to the browser, and records it on the answer. Accepting checks that the note is still the version the diff was shown against (otherwise the card shows the new diff), writes it atomically and removes the draft. *Request changes* is a normal question that carries the draft; the next `write_note` for that note becomes version 2. At most 20 drafts per chat (200 kB each) are kept; *New chat* removes open drafts, never notes.
 - **Prompts and settings never go on the command line**: the prompt goes in on stdin, and JSON (settings, MCP config) as files in the chat's `.agents/` folder. That avoids command-line length limits and, on Windows, quoting problems with `.cmd` shims. CLIs are started with [cross-spawn](https://github.com/moxystudio/node-cross-spawn) (finds `.exe` / `.cmd` via `PATHEXT`), and stopping an answer ends the whole process tree (`taskkill /T` on Windows).
 - **The prompt** contains the selected passage, the full text of that page, paths of attached pictures, the answer language and level, and your question. The first turn adds the tutor rules (cite pages as `[p. N](#page=N)`, …) and, in a folder, the list of documents with short ids (`d7`), text files and outlines. Other documents are cited as `[Name, p. N](#doc=d7&page=N)`. When a folder changes, the next turn tells the assistant what is in it now.
 - **Switching assistants**: the other assistant gets the messages it hasn't seen yet as context.
 - **Review / Challenge** is a normal question with `mode: "review-note"` or `"challenge-note"` and the note's name (and lines). ydust saves the editor first, reads the note itself and puts it into the prompt with line numbers (up to 30,000 characters; for longer notes the assistant is told to read the rest with `read_note`). The assistant is asked to verify claims with `search`/`read_pages`, cite pages, link note lines as `[L12](#note-line=12)` and not rewrite the note. *Propose fixes* (`mode: "fix-note"`) asks for a `write_note` replace draft. The chat shows a chip (*Review of summary.md*) instead of the prompt; *Ask Claude* / *Ask Antigravity* reviews the same note again for a second opinion.
+- **Highlights** live in `highlights.json` next to the PDF (not in `meta.json`, so marking and chatting never write the same file). Each one is anchored by page and text plus which occurrence of that text on the page, and found again with the same forgiving matching as search, so it survives zooming, dark pages and a new text extraction. Bars are drawn under the text with multiply; on dark and tinted pages stronger colours keep each hue recognisable.
 - **Notes** are files in the chat's `notes/` folder, edited with CodeMirror and previewed with the same renderer as answers. Names are checked on the server (letters, digits, space, `.`, `_`, `-`, ending in `.md`, no paths, no names Windows reserves) and links aren't followed; a note is at most 1 MB, a chat has at most 200. Each save sends a hash of the version it started from: if the file changed in between (another tab, another editor), the server refuses with the current content and the editor asks which version to keep.
 
 **Antigravity** is started like this:
@@ -214,7 +216,7 @@ agy --print= --input-format stream-json --output-format stream-json --disable-sl
 
 ```json
 { "permissions": {
-    "allow": ["read_file(<chat folder>)", "read_file(<other doc folders>)", "mcp(ydust/search)", "mcp(ydust/read_pages)",
+    "allow": ["read_file(<chat folder>)", "read_file(<other doc folders>)", "mcp(ydust/search)", "mcp(ydust/read_pages)", "mcp(ydust/list_highlights)",
               "mcp(ydust/list_notes)", "mcp(ydust/read_note)", "mcp(ydust/write_note)"],
     "deny": ["write_file(*)", "command(*)", "read_url(*)", "execute_url(*)"] } }
 ```
@@ -227,7 +229,7 @@ ydust writes the custom agent to `.agents/agents/ydust-tutor.md` and the documen
 claude --print --output-format stream-json --verbose --include-partial-messages \
     --permission-mode default --tools Read Grep Glob \
     --strict-mcp-config [--mcp-config .agents/claude-mcp.json] \
-    --allowedTools mcp__ydust__search mcp__ydust__read_pages mcp__ydust__list_notes mcp__ydust__read_note mcp__ydust__write_note \
+    --allowedTools mcp__ydust__search mcp__ydust__read_pages mcp__ydust__list_highlights mcp__ydust__list_notes mcp__ydust__read_note mcp__ydust__write_note \
     [--add-dir <other doc folder> …] [--resume <session-id>] [--model opus|sonnet|haiku] [--effort <level>]
 ```
 
@@ -242,6 +244,7 @@ library/
 │   ├── document.txt      text of every page ("=== Page N ===")
 │   ├── outline.txt       bookmarks or page headings ("p. 12: Chapter 2")
 │   ├── meta.json         name, chat history, one session id per CLI
+│   ├── highlights.json   your coloured highlights (page, text, which occurrence, colour, comment)
 │   ├── images/           pictures attached in this PDF's chat
 │   ├── notes/            your notes for this PDF, plain Markdown (summary.md, …)
 │   │   └── .drafts/      the assistant's drafts waiting for your review
@@ -257,7 +260,8 @@ library/
 
 ## Limitations and ideas
 
-- **Scanned PDFs** have no text layer: no text selection or search, and the tutor can't read them. Snipping works. OCR would help.
+- **Scanned PDFs** have no text layer: no text selection, search or highlights, and the tutor can't read them. Snipping works. OCR would help; region highlights (a box on the page) would be a way to mark scans.
+- **Highlight colours under the *Night* tint**: the tint takes out blue light, so a blue highlight looks grey there (the list still shows its colour). Own labels per colour (e.g. *definition*, *exam*) would be nice.
 - **Dark pages** invert pictures too, so photos look like negatives.
 - **Drafts** are accepted as a whole; accepting single hunks or editing a draft before accepting it would be nice. A chat writes only into its own notes (a folder chat into the folder's notes).
 - Ideas: flashcard export; approving tool use from the UI via `agy acp` (Agent Client Protocol).
