@@ -32,7 +32,7 @@ describe("Claude Code", () => {
   });
 
   it("pre-approves only ydust's own MCP tools, and loads no other MCP server", () => {
-    expect(values(args, "--allowedTools")).toEqual(["mcp__ydust__search", "mcp__ydust__read_pages", "mcp__ydust__list_notes", "mcp__ydust__read_note", "mcp__ydust__write_note"]);
+    expect(values(args, "--allowedTools")).toEqual(["mcp__ydust__search", "mcp__ydust__read_pages", "mcp__ydust__list_highlights", "mcp__ydust__list_notes", "mcp__ydust__read_note", "mcp__ydust__write_note"]);
     expect(args).toContain("--strict-mcp-config");
     expect(values(args, "--permission-mode")).toEqual(["default"]);
   });
@@ -57,6 +57,7 @@ describe("Antigravity", () => {
       "read_file(/lib/d2)",
       "mcp(ydust/search)",
       "mcp(ydust/read_pages)",
+      "mcp(ydust/list_highlights)",
       "mcp(ydust/list_notes)",
       "mcp(ydust/read_note)",
       "mcp(ydust/write_note)",
@@ -74,7 +75,7 @@ describe("ydust's MCP server for a turn", () => {
     expect(turn.tools).toEqual([...MCP_TOOLS]);
     const noApi = ydustServer(docs, { dir: "/lib/d1/notes" });
     expect(noApi.server.env).not.toHaveProperty("YDUST_TURN_TOKEN");
-    expect(noApi.tools).toEqual(["search", "read_pages", "list_notes", "read_note"]);
+    expect(noApi.tools).toEqual(["search", "read_pages", "list_highlights", "list_notes", "read_note"]);
   });
 
   it("offers search only when there is text to search", () => {

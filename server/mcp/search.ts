@@ -5,6 +5,7 @@
  *   search(query, doc?)            forgiving full-text search (accents, ß/ss, hyphenation,
  *                                  case and line breaks don't matter), like the in-app search
  *   read_pages(doc?, from, to?)    exact text of a page range
+ *   list_highlights(doc?, color?)  the passages the user marked in colour, with their comments
  *   list_notes()                   the chat's notes: names, sizes, dates, first heading
  *   read_note(name)                the text of one note
  *   write_note(name, content,      proposes a draft for the user to review; never writes the
@@ -18,9 +19,10 @@
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { findInString, fold } from "../../src/lib/textMatch.ts";
+import { readHighlightsFile } from "../highlights.ts";
 import { NoteError, listNotesIn, readNoteIn } from "../notes.ts";
 
-export type ScopeDoc = { alias: string; name: string; textFile: string };
+export type ScopeDoc = { alias: string; name: string; textFile: string; highlightsFile?: string };
 
 const MAX_PER_DOC = 8;
 const MAX_TOTAL = 30;
@@ -150,6 +152,37 @@ export async function readPages(docs: ScopeDoc[], args: { doc?: unknown; from?: 
   return out.join("\n\n");
 }
 
+const COLORS = ["yellow", "green", "blue", "pink", "orange"];
+
+export async function listHighlightsTool(docs: ScopeDoc[], args: { doc?: unknown; color?: unknown }): Promise<string> {
+  let scope = docs;
+  if (args.doc !== undefined && args.doc !== null && args.doc !== "") {
+    const d = findDoc(docs, args.doc);
+    if (typeof d === "string") return d;
+    scope = [d];
+  }
+  const color = typeof args.color === "string" && args.color ? args.color.toLowerCase() : null;
+  if (color && !COLORS.includes(color)) return `\`color\` must be one of ${COLORS.join(", ")}.`;
+  const out: string[] = [];
+  let total = 0;
+  for (const d of scope) {
+    if (!d.highlightsFile) continue;
+    const list = await readHighlightsFile(d.highlightsFile).catch(() => null);
+    if (!list) {
+      out.push("", `[${d.alias}] "${d.name}": its highlights could not be read.`);
+      continue;
+    }
+    const shown = list.filter((h) => !color || h.color === color).sort((a, b) => a.page - b.page);
+    if (!shown.length) continue;
+    total += shown.length;
+    out.push("", `[${d.alias}] "${d.name}" (${shown.length}):`);
+    for (const h of shown) out.push(`  p. ${h.page} (${h.color}): «${oneLine(h.text).slice(0, 600)}»${h.comment ? ` — my comment: ${oneLine(h.comment)}` : ""}`);
+  }
+  if (!total && out.length) return out.join("\n").trim();
+  if (!total) return `No highlights${color ? ` in ${color}` : ""}${scope.length === 1 ? ` in [${scope[0].alias}] "${scope[0].name}"` : ""}.`;
+  return [`${total} highlight${total === 1 ? "" : "s"}${color ? ` in ${color}` : ""}:`, ...out].join("\n");
+}
+
 const DOC_TOOLS = [
   {
     name: "search",
@@ -177,6 +210,18 @@ const DOC_TOOLS = [
         to: { type: "integer", description: "Last page (inclusive). Default: same as from." },
       },
       required: ["from"],
+    },
+  },
+  {
+    name: "list_highlights",
+    description:
+      "List the passages the user highlighted in the documents (page, colour, text, their comment). Useful for \"quiz me on what I marked\" or summaries of the user's marks.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        doc: { type: "string", description: "Optional: only this document (its id, e.g. d3). Default: all documents." },
+        color: { type: "string", enum: COLORS, description: "Optional: only highlights in this colour." },
+      },
     },
   },
 ];
@@ -320,6 +365,8 @@ function serve(docs: ScopeDoc[], notes: NotesScope | null) {
               ? await search(docs, args)
               : name === "read_pages"
                 ? await readPages(docs, args)
+                : name === "list_highlights"
+                  ? await listHighlightsTool(docs, args)
                 : name === "list_notes"
                   ? await listNotesTool(notes!)
                   : await readNoteTool(notes!, args);
@@ -339,7 +386,7 @@ function scopeFromEnv(): ScopeDoc[] {
   try {
     const raw = JSON.parse(process.env.YDUST_DOCS ?? "[]");
     return Array.isArray(raw)
-      ? raw.filter((d) => d && typeof d.alias === "string" && typeof d.name === "string" && typeof d.textFile === "string")
+      ? raw.filter((d) => d && typeof d.alias === "string" && typeof d.name === "string" && typeof d.textFile === "string" && (d.highlightsFile === undefined || typeof d.highlightsFile === "string"))
       : [];
   } catch {
     return [];

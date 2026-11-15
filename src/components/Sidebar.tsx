@@ -3,20 +3,29 @@ import { Check, ChevronRight, FileText, Folder, FolderInput, FolderOpen, FolderP
 import { useEffect, useRef, useState } from "react";
 import { api, type ChatTarget, type DocSummary, type FolderSummary } from "../lib/api";
 
-/** A delete confirmation that names the notes going with it (counted when you click the bin). */
+/** A delete confirmation that names the notes (and a PDF's highlights) going with it, counted when you click the bin. */
 function useNoteCount(target: ChatTarget, asking: boolean) {
-  const [count, setCount] = useState<number | null>(null);
+  const [count, setCount] = useState<{ notes: number; highlights: number } | null>(null);
   useEffect(() => {
     if (!asking) return setCount(null);
     let cancelled = false;
-    api.listNotes(target).then((l) => !cancelled && setCount(l.length), () => {});
+    Promise.all([
+      api.listNotes(target).then((l) => l.length, () => 0),
+      target.kind === "doc" ? api.listHighlights(target.id).then((l) => l.length, () => 0) : 0,
+    ]).then(([notes, highlights]) => !cancelled && setCount({ notes, highlights }));
     return () => {
       cancelled = true;
     };
   }, [asking, target.kind, target.id]); // eslint-disable-line react-hooks/exhaustive-deps
   return count;
 }
-const withNotes = (n: number | null) => (n ? ` + ${n} note${n === 1 ? "" : "s"}` : "");
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+/** "+ 2 notes, 5 highlights" */
+const withNotes = (c: { notes: number; highlights: number } | null) => {
+  const parts = [c?.notes ? plural(c.notes, "note") : "", c?.highlights ? plural(c.highlights, "highlight") : ""].filter(Boolean);
+  return parts.length ? ` + ${parts.join(", ")}` : "";
+};
+const andNotes = (c: { notes: number; highlights: number } | null) => withNotes(c).replace(/^ \+ /, " and its ");
 
 /** Drag type for moving a document between folders. */
 const DOC_MIME = "application/x-ydust-doc";
@@ -297,7 +306,7 @@ function FolderRow({
             }}
             onBlur={() => setConfirm(false)}
             className="rounded-md bg-red-600 px-1.5 py-0.5 text-[11px] font-medium text-white"
-            title={`Deletes the folder, its chat${notes ? ` and its ${notes} note${notes === 1 ? "" : "s"}` : ""}. The PDFs stay in your library.`}
+            title={`Deletes the folder, its chat${andNotes(notes)}. The PDFs stay in your library.`}
           >
             Delete{withNotes(notes)}
           </button>
@@ -397,7 +406,7 @@ function DocRow(props: Props & { doc: DocSummary; onNewFolder: (docId: string) =
               onBlur={() => setConfirm(false)}
               autoFocus
               className="rounded-md bg-red-600 px-1.5 py-0.5 text-[11px] font-medium text-white"
-              title={`Deletes the PDF, its chat${notes ? ` and its ${notes} note${notes === 1 ? "" : "s"}` : ""}`}
+              title={`Deletes the PDF, its chat${andNotes(notes)}`}
             >
               Delete{withNotes(notes)}
             </button>

@@ -1,6 +1,11 @@
 /** A selected passage; `doc` = the document it is from (set in folder chats). */
 export type Quote = { text: string; page: number; doc?: string };
 
+export const HL_COLORS = ["yellow", "green", "blue", "pink", "orange"] as const;
+export type HlColor = (typeof HL_COLORS)[number];
+/** A passage marked in a colour; `occurrence`: which match of `text` on the page. */
+export type Highlight = { id: string; page: number; text: string; occurrence: number; color: HlColor; comment?: string; createdAt: string };
+
 export type AskMode = "check" | "review-note" | "challenge-note" | "fix-note";
 
 /** A note draft the assistant proposed in an answer (see DraftCard). */
@@ -183,6 +188,13 @@ export const api = {
   stop: (t: ChatTarget) => fetch(`${chatBase(t)}/stop`, send("POST")).then(json<{ ok: true }>),
   patchMessage: (t: ChatTarget, mid: string, body: { pinned?: boolean; note?: string }) =>
     fetch(`${chatBase(t)}/messages/${mid}`, send("PATCH", body)).then(json<Message>),
+
+  listHighlights: (docId: string) => fetch(`/api/docs/${docId}/highlights`).then(json<Highlight[]>),
+  addHighlight: (docId: string, body: { page: number; text: string; occurrence: number; color: HlColor; comment?: string }) =>
+    fetch(`/api/docs/${docId}/highlights`, send("POST", body)).then(json<Highlight>),
+  patchHighlight: (docId: string, hid: string, body: { color?: HlColor; comment?: string }) =>
+    fetch(`/api/docs/${docId}/highlights/${hid}`, send("PATCH", body)).then(json<Highlight>),
+  removeHighlight: (docId: string, hid: string) => fetch(`/api/docs/${docId}/highlights/${hid}`, send("DELETE")).then(json<{ ok: true }>),
 
   listNotes: (o: ChatTarget) => fetch(`${chatBase(o)}/notes`).then(json<NoteInfo[]>),
   getNote: (o: ChatTarget, name: string) => fetch(noteUrl(o, name)).then(json<Note>),

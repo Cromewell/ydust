@@ -8,7 +8,7 @@ export type McpServer = { command: string; args: string[]; env: Record<string, s
 /** MCP server name. */
 export const MCP_NAME = "ydust";
 /** Every tool it can have; a turn gets the ones that apply (see ydustServer). */
-export const MCP_TOOLS = ["search", "read_pages", "list_notes", "read_note", "write_note"] as const;
+export const MCP_TOOLS = ["search", "read_pages", "list_highlights", "list_notes", "read_note", "write_note"] as const;
 export type McpTool = (typeof MCP_TOOLS)[number];
 
 const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;

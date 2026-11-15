@@ -6,6 +6,7 @@ import { Hono, type Context, type Next } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import { PROVIDERS, isProviderId } from "./providers/index.ts";
+import { HighlightError, addHighlight, deleteHighlight, highlightsPath, listHighlights, patchHighlight } from "./highlights.ts";
 import { acceptDraft, clearDrafts, createDraft, discardDraft, getDraft, listDrafts, type DraftInfo } from "./drafts.ts";
 import { ydustServer } from "./mcp/launch.ts";
 import { MAX_NOTE_BYTES, NoteError, deleteNote, listNotes, notesDir, readNote, renameNote, saveNote } from "./notes.ts";
@@ -61,7 +62,7 @@ const MAX_IMAGE = 20 * 1024 * 1024;
 const MAX_IMAGES_PER_QUESTION = 10;
 const MAX_OUTLINE = 200_000;
 /** Bump when ydust's tools change, so resumed sessions are told about them. */
-const TOOLS_VERSION = 2;
+const TOOLS_VERSION = 3;
 
 /** Where ydust's MCP server reaches this server (set by index.ts once it listens; tests set it too). */
 export const runtime = { apiBase: "" };
@@ -260,6 +261,32 @@ app.delete("/api/docs/:id", async (c) => {
   await deleteDoc(id);
   return c.json({ ok: true });
 });
+
+// --- Highlights (a document's coloured marks) ---
+
+const highlights = (fn: (c: Context, id: string) => Promise<Response>) => async (c: Context) => {
+  try {
+    return await fn(c, c.req.param("id")!);
+  } catch (err) {
+    if (err instanceof HighlightError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+};
+const bodyOf = (c: Context) => c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+
+app.get(
+  "/api/docs/:id/highlights",
+  highlights(async (c, id) => ((await readMeta(id)) ? c.json(await listHighlights(id)) : c.json({ error: "not found" }, 404))),
+);
+app.post("/api/docs/:id/highlights", highlights(async (c, id) => c.json(await addHighlight(id, await bodyOf(c)), 201)));
+app.patch("/api/docs/:id/highlights/:hid", highlights(async (c, id) => c.json(await patchHighlight(id, c.req.param("hid")!, await bodyOf(c)))));
+app.delete(
+  "/api/docs/:id/highlights/:hid",
+  highlights(async (c, id) => {
+    await deleteHighlight(id, c.req.param("hid")!);
+    return c.json({ ok: true });
+  }),
+);
 
 // Text of every page (for in-document search).
 app.get("/api/docs/:id/pages", async (c) => {
@@ -582,7 +609,7 @@ function chatRoutes(kind: ChatKind, base: string) {
     // Sessions from before folders existed were told about this document only.
     const told = chat.contextSigs?.[providerId] ?? (scope.kind === "doc" ? scopeSignature({ ...scope, folder: null }) : "");
     // ydust's search/read_pages tools over the chat's documents (that have text); the first is the default.
-    const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile }));
+    const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile, highlightsFile: highlightsPath(d.id) }));
     // …and the chat's notes; drafts come back here with this turn's token.
     // A review or challenge only reads: no write_note in that turn (fixes are asked for separately).
     const token = randomBytes(32).toString("hex");

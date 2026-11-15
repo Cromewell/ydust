@@ -16,15 +16,17 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppearanceMenu } from "./components/AppearanceMenu";
 import { ChatPanel, type Attachment, type ChatPanelHandle, type PanelTab, type Streaming } from "./components/ChatPanel";
+import { HighlightMenu } from "./components/HighlightMenu";
+import { HighlightsPanel, SideTabs, type SideTab } from "./components/HighlightsPanel";
 import { NotePicker, type Anchor } from "./components/NotePicker";
 import type { OpenNote } from "./components/NotesPanel";
 import { OutlinePanel } from "./components/OutlinePanel";
-import { PdfViewer, type Flash, type Mark, type PdfSelection, type SearchState, type Zoom } from "./components/PdfViewer";
+import { PdfViewer, type Flash, type HighlightClick, type Mark, type PdfSelection, type SearchState, type Zoom } from "./components/PdfViewer";
 import { SearchBar, type SearchHit } from "./components/SearchBar";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { Sidebar } from "./components/Sidebar";
-import { api, ask, type AskMode, type Chat, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
-import { questionOf } from "./lib/export";
+import { api, ask, HL_COLORS, type AskMode, type Chat, type Highlight, type HlColor, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
+import { downloadText, highlightsMarkdown, questionOf, safeFilename } from "./lib/export";
 import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
 import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
 import type { TextSize } from "./lib/settings";
@@ -112,6 +114,15 @@ export default function App() {
   const [checkMode, setCheckMode] = useState(false);
 
   const [showOutline, setShowOutline] = useState(() => store.get("outline") === "1");
+  const [sideTab, setSideTab] = useState<SideTab>(() => (store.get("sideTab") === "highlights" ? "highlights" : "contents"));
+
+  // --- Highlights of the open PDF ---
+  const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [hlColor, setHlColor] = useState<HlColor>(() => {
+    const c = store.get("hlColor");
+    return HL_COLORS.includes(c as HlColor) ? (c as HlColor) : "yellow";
+  });
+  const [hlMenu, setHlMenu] = useState<HighlightClick | null>(null);
   const [showMarks, setShowMarks] = useState(() => store.get("marks") !== "0");
   const [appearance, setAppearance] = useState<PdfAppearance>(() => parseAppearance(store.get("appearance")));
   const pagesFilter = pageFilter(appearance);
@@ -227,6 +238,18 @@ export default function App() {
     const next = docs.find((d) => d.id !== activeId && needsText(d) && !failedIndex.current.has(d.id));
     if (next) void indexDoc(next.id);
   }, [docs, activeId, indexTick, indexDoc]);
+
+  // Its highlights.
+  useEffect(() => {
+    setHighlights([]);
+    setHlMenu(null);
+    if (!activeId) return;
+    let cancelled = false;
+    api.listHighlights(activeId).then((l) => !cancelled && setHighlights(l), () => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId]);
 
   // Load the active document and its PDF.
   useEffect(() => {
@@ -792,6 +815,59 @@ export default function App() {
     return q;
   }, [selection, activeId]);
 
+  /** Mark the selection in a colour (and remember the colour). */
+  const highlightSelection = useCallback(
+    async (color: HlColor) => {
+      const sel = selection;
+      const docId = activeId;
+      if (!sel || !docId) return;
+      takeSelection();
+      setHlColor(color);
+      store.set("hlColor", color);
+      try {
+        const h = await api.addHighlight(docId, { page: sel.page, text: sel.text, occurrence: sel.occurrence, color });
+        setHighlights((list) => [...list, h].sort((a, b) => a.page - b.page || a.createdAt.localeCompare(b.createdAt)));
+      } catch (e) {
+        flash(`Could not highlight: ${(e as Error).message}`);
+      }
+    },
+    [selection, activeId, takeSelection, flash],
+  );
+  const changeHighlight = useCallback(
+    async (id: string, patch: { color?: HlColor; comment?: string }) => {
+      if (!activeId) return;
+      setHighlights((list) => list.map((h) => (h.id === id ? { ...h, ...patch, comment: patch.comment === undefined ? h.comment : patch.comment || undefined } : h)));
+      if (patch.color) {
+        setHlColor(patch.color);
+        store.set("hlColor", patch.color);
+      }
+      await api.patchHighlight(activeId, id, patch).catch((e) => flash(`Could not save: ${(e as Error).message}`));
+    },
+    [activeId, flash],
+  );
+  const removeHighlight = useCallback(
+    async (id: string) => {
+      if (!activeId) return;
+      setHlMenu(null);
+      setHighlights((list) => list.filter((h) => h.id !== id));
+      await api.removeHighlight(activeId, id).catch((e) => flash(`Could not delete: ${(e as Error).message}`));
+    },
+    [activeId, flash],
+  );
+  /** A highlight (with its comment) as a quote for a note. */
+  const highlightBlock = useCallback(
+    (h: Highlight, owner: NoteOwner) => {
+      const from = doc && docs.find((d) => d.id === doc.id);
+      const link = from ? pageLink(owner, h.page, from) : `[p. ${h.page}](#page=${h.page})`;
+      return quoteForNote(h.text, link) + (h.comment ? `\n\n${h.comment}` : "");
+    },
+    [doc, docs],
+  );
+  // A new selection closes the highlight menu.
+  useEffect(() => {
+    if (selection) setHlMenu(null);
+  }, [selection]);
+
   const askAboutSelection = useCallback(() => {
     const q = takeSelection();
     if (q) setQuote(q);
@@ -989,7 +1065,7 @@ export default function App() {
                 store.set("outline", showOutline ? "0" : "1");
               }}
               className={clsx("icon-btn", showOutline && "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100")}
-              title="Table of contents"
+              title="Contents and highlights"
             >
               <ListTree className="size-4" />
             </button>
@@ -1064,15 +1140,36 @@ export default function App() {
         <div className={clsx("flex min-h-0 flex-1", resizing && "pointer-events-none")}>
         {showOutline && pdf && doc && (
           <div className="w-64 shrink-0 border-r border-zinc-200 dark:border-zinc-800">
-            <OutlinePanel
-              pdf={pdf}
-              page={page}
-              onJump={jumpTo}
-              onClose={() => {
+            {(() => {
+              const close = () => {
                 setShowOutline(false);
                 store.set("outline", "0");
-              }}
-            />
+              };
+              const header = (
+                <SideTabs
+                  tab={sideTab}
+                  onTab={(t) => {
+                    setSideTab(t);
+                    store.set("sideTab", t);
+                  }}
+                  count={highlights.length}
+                  onClose={close}
+                />
+              );
+              return sideTab === "contents" ? (
+                <OutlinePanel pdf={pdf} page={page} onJump={jumpTo} onClose={close} header={header} />
+              ) : (
+                <HighlightsPanel
+                  highlights={highlights}
+                  header={header}
+                  onOpen={(h) => openAt(doc.id, h.page, h.text)}
+                  onExport={(list) => downloadText(`${safeFilename(doc.name)} - highlights.md`, highlightsMarkdown(doc.name, list))}
+                  onCopyToNote={(list, anchor) =>
+                    toNote(anchor, `Copy ${list.length} highlight${list.length === 1 ? "" : "s"} into…`, (owner) => list.map((h) => highlightBlock(h, owner)).join("\n\n"))
+                  }
+                />
+              );
+            })()}
           </div>
         )}
         <div className="relative min-h-0 min-w-0 flex-1">
@@ -1161,6 +1258,8 @@ export default function App() {
               pageFilter={pagesFilter}
               tint={pagesTint}
               darkPages={appearance.mode === "dark"}
+              userHighlights={highlights}
+              onHighlightClick={setHlMenu}
             />
           )}
         </div>
@@ -1278,6 +1377,8 @@ export default function App() {
             const open = noteEditor.get();
             return open && panelTab === "notes" && showChat && noteOwners.some((o) => sameOwner(o, open.owner)) ? open.name : null;
           })()}
+          onHighlight={doc?.hasText ? (c) => void highlightSelection(c) : null}
+          lastColor={hlColor}
           onAddToNote={(anchor) => {
             const q = takeSelection();
             const from = doc && docs.find((d) => d.id === doc.id);
@@ -1286,6 +1387,35 @@ export default function App() {
           }}
         />
       )}
+
+      {hlMenu &&
+        doc &&
+        (() => {
+          const h = highlights.find((x) => x.id === hlMenu.id);
+          if (!h) return null;
+          return (
+            <HighlightMenu
+              key={h.id}
+              h={h}
+              anchor={hlMenu}
+              onClose={() => setHlMenu(null)}
+              onColor={(color) => void changeHighlight(h.id, { color })}
+              onComment={(comment) => void changeHighlight(h.id, { comment })}
+              onDelete={() => void removeHighlight(h.id)}
+              onAsk={() => {
+                setHlMenu(null);
+                setQuote({ text: h.text, page: h.page, doc: doc.id });
+                setShowChat(true);
+                setPanelTab("chat");
+                requestAnimationFrame(() => chatRef.current?.focus());
+              }}
+              onAddToNote={(anchor) => {
+                setHlMenu(null);
+                toNote(anchor, "Quote this highlight in…", (owner) => highlightBlock(h, owner));
+              }}
+            />
+          );
+        })()}
 
       {picker && noteOwners.length > 0 && (
         <NotePicker
