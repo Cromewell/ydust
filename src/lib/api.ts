@@ -1,6 +1,26 @@
 /** A selected passage; `doc` = the document it is from (set in folder chats). */
 export type Quote = { text: string; page: number; doc?: string };
 
+/** A note draft the assistant proposed in an answer (see DraftCard). */
+export type MessageDraft = {
+  id: string;
+  target: string;
+  mode: "create" | "append" | "replace";
+  summary: string;
+  revision: number;
+  replaces?: string;
+  status?: "accepted" | "discarded" | "superseded";
+  acceptedAs?: string;
+};
+/** A draft with its text, and the note as it is now (null: it doesn't exist). */
+export type Draft = MessageDraft & {
+  content: string;
+  baseVersion: string | null;
+  status: "open" | "superseded";
+  createdAt: string;
+  current: { content: string; version: string } | null;
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -16,6 +36,10 @@ export type Message = {
   mode?: "check";
   /** User messages: a second opinion on that assistant message. */
   secondOpinionOf?: string;
+  /** User messages: changes requested to this draft. */
+  draftRef?: { id: string; target: string; revision: number };
+  /** Assistant messages: note drafts proposed in this answer. */
+  drafts?: MessageDraft[];
   /** Assistant messages: pinned to the notes, with an optional own note. */
   pinned?: boolean;
   note?: string;
@@ -170,6 +194,17 @@ export const api = {
     }
     return json<SavedNote>(res);
   },
+  getDraft: (o: ChatTarget, did: string) => fetch(`${chatBase(o)}/drafts/${did}`).then(json<Draft>),
+  /** Write a draft into its note; `base`: the note version the diff was shown against. Throws NoteConflict if it changed. */
+  async acceptDraft(o: ChatTarget, did: string, body: { target?: string; base: string | null }) {
+    const res = await fetch(`${chatBase(o)}/drafts/${did}/accept`, send("POST", body));
+    if (res.status === 409) {
+      const b = await res.json().catch(() => ({}));
+      throw new NoteConflict(b.error ?? "The note changed meanwhile.", b.current ?? null);
+    }
+    return json<{ target: string; mode: string; version: string; removed: string[] }>(res);
+  },
+  discardDraft: (o: ChatTarget, did: string) => fetch(`${chatBase(o)}/drafts/${did}`, send("DELETE")).then(json<{ ok: true; removed: string[] }>),
   renameNote: (o: ChatTarget, name: string, to: string) => fetch(noteUrl(o, name), send("PATCH", { name: to })).then(json<NoteInfo>),
   removeNote: (o: ChatTarget, name: string) => fetch(noteUrl(o, name), send("DELETE")).then(json<{ ok: true }>),
 };
@@ -178,6 +213,7 @@ export type AskHandlers = {
   onUser: (m: Message) => void;
   onDelta: (text: string) => void;
   onTool: (t: ToolEvent) => void;
+  onDraft: (d: MessageDraft) => void;
   onDone: (m: Message) => void;
 };
 
@@ -189,6 +225,7 @@ export async function ask(
     level?: string;
     mode?: "check";
     secondOpinionOf?: string;
+    draftId?: string;
     quote?: Quote;
     model?: string;
     effort?: string;
@@ -223,6 +260,7 @@ export async function ask(
       if (event === "user") handlers.onUser(payload);
       else if (event === "delta") handlers.onDelta(payload);
       else if (event === "tool") handlers.onTool(payload);
+      else if (event === "draft") handlers.onDraft(payload);
       else if (event === "done") handlers.onDone(payload);
     }
   }

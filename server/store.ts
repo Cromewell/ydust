@@ -9,6 +9,20 @@ const STATE_PATH = path.join(LIBRARY_DIR, "state.json");
 /** A selected passage. `doc` = the document it is from (always set in folder chats). */
 export type Quote = { text: string; page: number; doc?: string };
 
+/** A draft the assistant proposed in an answer (the content lives in notes/.drafts/ until decided). */
+export type MessageDraft = {
+  id: string;
+  target: string;
+  mode: "create" | "append" | "replace";
+  summary: string;
+  revision: number;
+  replaces?: string;
+  /** Unset while open. */
+  status?: "accepted" | "discarded" | "superseded";
+  /** The note it went into (accepted). */
+  acceptedAs?: string;
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -27,6 +41,10 @@ export type Message = {
   mode?: "check";
   /** User messages: asks for a second opinion on this assistant message. */
   secondOpinionOf?: string;
+  /** User messages: asks for changes to this draft ("Request changes"). */
+  draftRef?: { id: string; target: string; revision: number };
+  /** Assistant messages: note drafts proposed in this answer. */
+  drafts?: MessageDraft[];
   /** Assistant messages: pinned to the notes, with an optional own note. */
   pinned?: boolean;
   note?: string;

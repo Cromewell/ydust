@@ -32,8 +32,9 @@ export type RunOptions = {
   cwd: string;
   /** Extra folders the agent may read (e.g. the other documents of the same folder). */
   readDirs?: string[];
-  /** ydust's document tools (search, read_pages) as an MCP server, if any. */
+  /** ydust's tools as an MCP server, if any, and which of its tools this turn has. */
   mcp?: McpServer | null;
+  mcpTools?: readonly string[];
   sessionId?: string | null;
   model?: string | null;
   /** Reasoning effort, one of Provider.efforts. */

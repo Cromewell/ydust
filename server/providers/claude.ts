@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { MCP_NAME, MCP_TOOLS } from "../mcp/launch.ts";
+import { MCP_NAME } from "../mcp/launch.ts";
 import { cached, cliFile, killTree, runLines, runQuick, writeFileIfChanged, type AgentResult, type Model, type Provider, type RunOptions } from "./types.ts";
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
@@ -40,18 +40,13 @@ function cleanEnv() {
 
 /**
  * Claude Code CLI in print mode. Only the read-only tools Read/Grep/Glob exist in the
- * session (no Bash, no edits, no web), plus ydust's own document tools (search, read_pages)
- * as the only MCP server; in "default" permission mode anything outside the working
- * directory and the added folders is denied.
+ * session (no Bash, no edits, no web), plus ydust's own tools as the only MCP server (its
+ * write_note only proposes drafts); in "default" permission mode anything outside the
+ * working directory and the added folders is denied.
  */
-async function run(opts: RunOptions): Promise<AgentResult> {
-  // --strict-mcp-config alone loads no MCP servers; with ydust's tools, their config as a file.
-  const mcpArgs: string[] = [];
-  if (opts.mcp) {
-    const file = cliFile(opts.cwd, "claude-mcp.json");
-    await writeFileIfChanged(file, JSON.stringify({ mcpServers: { [MCP_NAME]: { type: "stdio", ...opts.mcp } } }, null, 2));
-    mcpArgs.push("--mcp-config", file);
-  }
+/** Claude Code's command line for a turn (`mcpConfig`: the file with ydust's MCP server). */
+export function claudeArgs(opts: Omit<RunOptions, "prompt" | "onEvent" | "cwd">, mcpConfig: string | null): string[] {
+  const mcpArgs = mcpConfig ? ["--mcp-config", mcpConfig] : [];
   const args = [
     "--print",
     "--output-format",
@@ -68,11 +63,22 @@ async function run(opts: RunOptions): Promise<AgentResult> {
     "Grep",
     "Glob",
   ];
-  if (opts.mcp) args.push("--allowedTools", ...MCP_TOOLS.map((t) => `mcp__${MCP_NAME}__${t}`));
+  if (mcpConfig && opts.mcpTools?.length) args.push("--allowedTools", ...opts.mcpTools.map((t) => `mcp__${MCP_NAME}__${t}`));
   for (const d of opts.readDirs ?? []) args.push("--add-dir", d);
   if (opts.sessionId) args.push("--resume", opts.sessionId);
   if (opts.model) args.push("--model", opts.model);
   if (opts.effort) args.push("--effort", opts.effort);
+  return args;
+}
+
+async function run(opts: RunOptions): Promise<AgentResult> {
+  // --strict-mcp-config alone loads no MCP servers; with ydust's tools, their config as a file.
+  let mcpConfig: string | null = null;
+  if (opts.mcp) {
+    mcpConfig = cliFile(opts.cwd, "claude-mcp.json");
+    await writeFileIfChanged(mcpConfig, JSON.stringify({ mcpServers: { [MCP_NAME]: { type: "stdio", ...opts.mcp } } }, null, 2));
+  }
+  const args = claudeArgs(opts, mcpConfig);
 
   let sessionId = opts.sessionId ?? null;
   let response = "";
@@ -119,7 +125,7 @@ async function run(opts: RunOptions): Promise<AgentResult> {
           if (b.type !== "tool_use") continue;
           toolNames.set(b.id, b.name);
           const i = b.input ?? {};
-          const detail = i.file_path ?? i.pattern ?? i.path ?? i.query ?? (i.from ? `${i.doc ?? ""} p. ${i.from}${i.to ? `–${i.to}` : ""}`.trim() : undefined);
+          const detail = i.file_path ?? i.pattern ?? i.path ?? i.query ?? i.name ?? (i.from ? `${i.doc ?? ""} p. ${i.from}${i.to ? `–${i.to}` : ""}`.trim() : undefined);
           opts.onEvent({ type: "tool", name: b.name, state: "active", detail: typeof detail === "string" ? detail : undefined });
         }
       } else if (e.type === "user") {

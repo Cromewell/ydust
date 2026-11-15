@@ -1,6 +1,6 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { app } from "./app.ts";
+import { app, runtime } from "./app.ts";
 import { LIBRARY_DIR, ensureAliases } from "./store.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -15,5 +15,7 @@ if (process.argv.includes("--production") || process.env.NODE_ENV === "productio
 
 await ensureAliases();
 serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) => {
+  // ydust's MCP server hands drafts back here (always over loopback).
+  runtime.apiBase = `http://${HOST === "::1" ? "[::1]" : HOST === "localhost" ? "localhost" : "127.0.0.1"}:${info.port}`;
   console.log(`ydust server on http://${HOST}:${info.port}  (library: ${LIBRARY_DIR})`);
 });

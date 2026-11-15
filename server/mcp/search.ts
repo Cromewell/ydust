@@ -1,17 +1,24 @@
 /**
- * ydust's read-only document tools for the agents, as a tiny MCP server (stdio,
- * newline-delimited JSON-RPC, no dependencies).
+ * ydust's tools for the agents, as a tiny MCP server (stdio, newline-delimited JSON-RPC,
+ * no dependencies).
  *
  *   search(query, doc?)            forgiving full-text search (accents, ß/ss, hyphenation,
  *                                  case and line breaks don't matter), like the in-app search
  *   read_pages(doc?, from, to?)    exact text of a page range
+ *   list_notes()                   the chat's notes: names, sizes, dates, first heading
+ *   read_note(name)                the text of one note
+ *   write_note(name, content,      proposes a draft for the user to review; never writes the
+ *              mode, summary)      note itself (ydust stores the draft, the user accepts it)
  *
- * Which documents it may read comes from ydust, never from the model: YDUST_DOCS is a JSON
- * array of { alias, name, textFile } (the first is the default document).
+ * What it may touch comes from ydust, never from the model:
+ *   YDUST_DOCS        JSON array of { alias, name, textFile } (the first is the default document)
+ *   YDUST_NOTES_DIR   the chat's notes folder (read only)
+ *   YDUST_API, YDUST_TURN_TOKEN   where to hand drafts to ydust, valid while this turn runs
  */
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { findInString, fold } from "../../src/lib/textMatch.ts";
+import { NoteError, listNotesIn, readNoteIn } from "../notes.ts";
 
 export type ScopeDoc = { alias: string; name: string; textFile: string };
 
@@ -143,7 +150,7 @@ export async function readPages(docs: ScopeDoc[], args: { doc?: unknown; from?: 
   return out.join("\n\n");
 }
 
-const TOOLS = [
+const DOC_TOOLS = [
   {
     name: "search",
     description:
@@ -174,9 +181,110 @@ const TOOLS = [
   },
 ];
 
+// --- Notes ---
+
+export type NotesScope = { dir: string; api?: string; token?: string };
+const MAX_NOTE_READ = 100_000;
+
+const kb = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
+
+export async function listNotesTool(scope: NotesScope): Promise<string> {
+  const notes = await listNotesIn(scope.dir);
+  if (!notes.length) return "There are no notes yet.";
+  return [
+    `${notes.length} note${notes.length === 1 ? "" : "s"}:`,
+    ...notes.map((n) => `- ${n.name} (${kb(n.size)}, edited ${n.updatedAt.slice(0, 10)})${n.title ? `: # ${n.title}` : ""}`),
+  ].join("\n");
+}
+
+/** Versions of the notes read in this turn: "replace" is only accepted for a note read as it is now. */
+const readVersions = new Map<string, string>();
+
+export async function readNoteTool(scope: NotesScope, args: { name?: unknown }): Promise<string> {
+  if (typeof args.name !== "string") return "`name` must be the note's file name, e.g. summary.md (see list_notes).";
+  try {
+    const note = await readNoteIn(scope.dir, args.name);
+    readVersions.set(note.name, note.version);
+    const text = note.content.length > MAX_NOTE_READ ? `${note.content.slice(0, MAX_NOTE_READ)}\n\n(The note continues: ${note.content.length - MAX_NOTE_READ} more characters not shown.)` : note.content;
+    return `=== Note ${note.name} ===\n${text || "(empty)"}`;
+  } catch (err) {
+    if (err instanceof NoteError) return `${err.message} ${err.status === 404 ? "list_notes shows the existing notes." : ""}`.trim();
+    throw err;
+  }
+}
+
+export async function writeNoteTool(scope: NotesScope, args: { name?: unknown; content?: unknown; mode?: unknown; summary?: unknown }): Promise<{ text: string; error: boolean }> {
+  if (!scope.api || !scope.token) return { text: "Writing notes is not available in this conversation.", error: true };
+  const res = await fetch(`${scope.api}/api/internal/drafts`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token: scope.token,
+      target: args.name,
+      mode: args.mode,
+      content: args.content,
+      summary: args.summary,
+      readVersion: typeof args.name === "string" ? readVersions.get(args.name) : undefined,
+    }),
+  }).catch((err: Error) => ({ ok: false, status: 0, json: async () => ({ error: `ydust is not reachable (${err.message}).` }) }));
+  const body = (await res.json().catch(() => ({}))) as { error?: string; target?: string; mode?: string; revision?: number };
+  if (!res.ok) return { text: `The draft was not saved: ${body.error ?? `error ${res.status}`}`, error: true };
+  const what = body.mode === "create" ? `a new note "${body.target}"` : body.mode === "append" ? `an addition to "${body.target}"` : `a new version of "${body.target}"`;
+  return {
+    text:
+      `Saved as a draft for review: ${what}${body.revision && body.revision > 1 ? ` (version ${body.revision})` : ""}. Nothing is written yet: ` +
+      `the user sees the draft as a diff under your answer and accepts it, asks for changes, or discards it. ` +
+      `Don't repeat the draft's text in your answer; say in a sentence or two what you drafted.`,
+    error: false,
+  };
+}
+
+const NOTE_TOOLS = [
+  {
+    name: "list_notes",
+    description: "List the user's notes for this chat (Markdown files): name, size, last edit and first heading of each.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "read_note",
+    description: "Read the full text of one of the user's notes.",
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string", description: "The note's file name, e.g. summary.md (from list_notes)." } },
+      required: ["name"],
+    },
+  },
+];
+
+const WRITE_TOOL = {
+  name: "write_note",
+  description:
+    "Propose text for one of the user's notes (Markdown with $…$ math and page links like [p. 12](#page=12)). It is saved as a draft that the user " +
+    "reviews as a diff and accepts or rejects; nothing changes until they accept. Call list_notes first and pick the note that fits; create a new " +
+    "note only if none does. mode: create (a new note), append (add to the end of an existing note), replace (the whole new text of an existing " +
+    "note: only after read_note, and keep what the user wrote unless asked otherwise).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "File name: short and descriptive, letters/digits/spaces/._- only, ending in .md, e.g. \"Exercises chapter 3.md\"." },
+      content: { type: "string", description: "The Markdown text: the whole note (create, replace) or the part to add (append)." },
+      mode: { type: "string", enum: ["create", "append", "replace"] },
+      summary: { type: "string", description: "One line for the user: what this draft is." },
+    },
+    required: ["name", "content", "mode", "summary"],
+  },
+};
+
+/** The tools available with these documents and notes. */
+export function toolsFor(docs: ScopeDoc[], notes: NotesScope | null) {
+  return [...(docs.length ? DOC_TOOLS : []), ...(notes ? NOTE_TOOLS : []), ...(notes?.api && notes.token ? [WRITE_TOOL] : [])];
+}
+
 // --- JSON-RPC over stdio ---
 
-function serve(docs: ScopeDoc[]) {
+function serve(docs: ScopeDoc[], notes: NotesScope | null) {
+  const tools = toolsFor(docs, notes);
+  const has = (name: string) => tools.some((t) => t.name === name);
   const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
   createInterface({ input: process.stdin }).on("line", async (line) => {
     let req: { jsonrpc?: string; id?: string | number; method?: string; params?: any };
@@ -197,13 +305,24 @@ function serve(docs: ScopeDoc[]) {
       case "ping":
         return reply({});
       case "tools/list":
-        return reply({ tools: TOOLS });
+        return reply({ tools });
       case "tools/call": {
         const name = req.params?.name;
         const args = req.params?.arguments ?? {};
         try {
-          const text = name === "search" ? await search(docs, args) : name === "read_pages" ? await readPages(docs, args) : null;
-          if (text === null) return reply({ content: [{ type: "text", text: `Unknown tool ${name}` }], isError: true });
+          if (typeof name !== "string" || !has(name)) return reply({ content: [{ type: "text", text: `Unknown tool ${name}` }], isError: true });
+          if (name === "write_note") {
+            const r = await writeNoteTool(notes!, args);
+            return reply({ content: [{ type: "text", text: r.text }], ...(r.error ? { isError: true } : {}) });
+          }
+          const text =
+            name === "search"
+              ? await search(docs, args)
+              : name === "read_pages"
+                ? await readPages(docs, args)
+                : name === "list_notes"
+                  ? await listNotesTool(notes!)
+                  : await readNoteTool(notes!, args);
           return reply({ content: [{ type: "text", text }] });
         } catch (err) {
           return reply({ content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true });
@@ -227,4 +346,10 @@ function scopeFromEnv(): ScopeDoc[] {
   }
 }
 
-if (process.env.YDUST_DOCS !== undefined) serve(scopeFromEnv());
+function notesFromEnv(): NotesScope | null {
+  const dir = process.env.YDUST_NOTES_DIR;
+  if (!dir) return null;
+  return { dir, api: process.env.YDUST_API || undefined, token: process.env.YDUST_TURN_TOKEN || undefined };
+}
+
+if (process.env.YDUST_DOCS !== undefined || process.env.YDUST_NOTES_DIR !== undefined) serve(scopeFromEnv(), notesFromEnv());
