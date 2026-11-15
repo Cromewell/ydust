@@ -8,6 +8,7 @@ import {
   FileSearch,
   FileText,
   Folder,
+  Globe,
   GraduationCap,
   Loader2,
   MessageSquarePlus,
@@ -100,6 +101,9 @@ type Props = {
   onReviewNote: (owner: NoteOwner, name: string, mode: "review-note" | "challenge-note", lines?: [number, number]) => void;
   /** Under a review: ask for the fixes as a draft. */
   onProposeFixes: (noteName: string) => void;
+  /** Web search for the next question. */
+  web: boolean;
+  onWeb: (on: boolean) => void;
 };
 
 /**
@@ -506,6 +510,40 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
             >
               <GraduationCap className="size-[18px]" />
             </button>
+            {(() => {
+              const p = providers.find((x) => x.id === provider);
+              const can = !!p?.webSearch;
+              const on = props.web && can;
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!can) return;
+                    props.onWeb(!props.web);
+                    textarea.current?.focus();
+                  }}
+                  aria-pressed={on}
+                  aria-disabled={!can}
+                  className={clsx(
+                    "flex size-9 shrink-0 items-center justify-center rounded-xl transition",
+                    on
+                      ? "bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-300"
+                      : can
+                        ? "text-zinc-500 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                        : "cursor-not-allowed text-zinc-300 dark:text-zinc-600",
+                  )}
+                  title={
+                    can
+                      ? on
+                        ? "Web search is on for this question: you approve each search"
+                        : "Search the web for this question (you approve each search)"
+                      : (p?.webSearchNote ?? "Web search isn't available for this assistant")
+                  }
+                >
+                  <Globe className="size-[18px]" />
+                </button>
+              );
+            })()}
             <textarea
               ref={textarea}
               rows={1}
@@ -634,6 +672,11 @@ function MessageView(
           </div>
         )}
         {m.quote && <QuoteChip q={m.quote} size={size} onJumpQuote={onJumpQuote} docName={docName} />}
+        {m.web && (
+          <span className="flex items-center gap-1 text-[11px] font-medium text-sky-600 dark:text-sky-400">
+            <Globe className="size-3.5" /> Web search on
+          </span>
+        )}
         {m.draftRef && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-violet-600 dark:text-violet-400">
             <NotebookPen className="size-3.5" /> Changes to the draft for {m.draftRef.target}
@@ -710,6 +753,7 @@ function MessageView(
         </div>
       )}
       {m.drafts?.length ? <Drafts {...props} list={m.drafts} busy={busy} /> : null}
+      {m.webQueries?.length ? <WebBadge queries={m.webQueries} /> : null}
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
         <ProviderTag id={m.provider ?? "agy"} label={label(m.provider)} model={m.model} modelLabel={m.modelLabel} effort={m.effort} />
         {m.stopped && <span>Stopped</span>}
@@ -930,9 +974,26 @@ function toolLabel(t: ToolEvent) {
   if (own === "list_notes") return "Looking at your notes…";
   if (own === "read_note") return t.detail ? `Reading your note ${t.detail}…` : "Reading your note…";
   if (own === "write_note") return t.detail ? `Drafting ${t.detail}…` : "Drafting a note…";
+  if (t.name === "WebSearch") return t.detail ? `Searching the web for “${t.detail}”…` : "Searching the web…";
   if (["read_file", "view_file", "Read"].includes(t.name)) return "Reading the document…";
   if (["grep_search", "Grep", "Glob"].includes(t.name)) return "Searching the document…";
   return `Using ${t.name.replace(/_/g, " ")}…`;
+}
+
+/** "Web · 2 searches": the queries the user allowed for this answer. */
+function WebBadge({ queries }: { queries: string[] }) {
+  return (
+    <details className="group/web mt-2 text-[11px]">
+      <summary className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-sky-50 px-1.5 py-0.5 font-medium text-sky-700 select-none hover:bg-sky-100 dark:bg-sky-500/10 dark:text-sky-300 dark:hover:bg-sky-500/20">
+        <Globe className="size-3" /> Web · {queries.length} search{queries.length === 1 ? "" : "es"}
+      </summary>
+      <ul className="mt-1 ml-1 list-inside list-disc text-zinc-500">
+        {queries.map((q, i) => (
+          <li key={i}>“{q}”</li>
+        ))}
+      </ul>
+    </details>
+  );
 }
 
 /** "Review of summary.md (lines 3–8)" on a question about a note. */

@@ -1,4 +1,5 @@
 import "katex/dist/katex.min.css";
+import { ExternalLink } from "lucide-react";
 import { memo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -83,9 +84,17 @@ export const Markdown = memo(function Markdown({
       }
       // Local file links (and anything the URL sanitizer stripped) render as plain text.
       if (!href || !/^https?:\/\//.test(href)) return <span>{children}</span>;
+      // Web links (sources of a web search): a new tab, marked unlike page citations.
+      let host = "";
+      try {
+        host = new URL(href).hostname.replace(/^www\./, "");
+      } catch {
+        /* keep empty */
+      }
       return (
-        <a href={href} target="_blank" rel="noreferrer noopener">
+        <a href={href} target="_blank" rel="noreferrer noopener" title={host ? `Opens ${host} in a new tab` : undefined} className="text-sky-700 decoration-sky-300 dark:text-sky-300">
           {children}
+          <ExternalLink className="ml-0.5 inline size-[0.8em] align-baseline opacity-60" aria-hidden />
         </a>
       );
     },

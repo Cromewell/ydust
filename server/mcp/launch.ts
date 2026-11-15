@@ -8,7 +8,7 @@ export type McpServer = { command: string; args: string[]; env: Record<string, s
 /** MCP server name. */
 export const MCP_NAME = "ydust";
 /** Every tool it can have; a turn gets the ones that apply (see ydustServer). */
-export const MCP_TOOLS = ["search", "read_pages", "list_highlights", "list_notes", "read_note", "write_note"] as const;
+export const MCP_TOOLS = ["search", "read_pages", "list_highlights", "list_notes", "read_note", "write_note", "approve"] as const;
 export type McpTool = (typeof MCP_TOOLS)[number];
 
 const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
@@ -19,18 +19,20 @@ const serverFile = fileURLToPath(new URL("./search.ts", import.meta.url));
  * default for read_pages), and the chat's notes (drafts go back to ydust with the turn's
  * token). Absolute paths only: the CLI starts it from the chat's folder.
  */
-export function ydustServer(docs: ScopeDoc[], notes: NotesScope | null): { server: McpServer; tools: McpTool[] } {
+export function ydustServer(docs: ScopeDoc[], notes: NotesScope | null, opts: { web?: boolean } = {}): { server: McpServer; tools: McpTool[] } {
   const env: Record<string, string> = { YDUST_DOCS: JSON.stringify(docs) };
   if (notes) {
     env.YDUST_NOTES_DIR = notes.dir;
     if (notes.api && notes.token) {
       env.YDUST_API = notes.api;
       env.YDUST_TURN_TOKEN = notes.token;
+      if (notes.write === false) env.YDUST_NOTES_WRITE = "0";
+      if (opts.web) env.YDUST_WEB = "1";
     }
   }
   return {
     server: { command: process.execPath, args: ["--import", tsxLoader, serverFile], env },
-    tools: toolsFor(docs, notes).map((t) => t.name as McpTool),
+    tools: toolsFor(docs, notes, opts).map((t) => t.name as McpTool),
   };
 }
 

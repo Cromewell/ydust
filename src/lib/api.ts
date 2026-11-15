@@ -49,6 +49,10 @@ export type Message = {
   draftRef?: { id: string; target: string; revision: number };
   /** Assistant messages: note drafts proposed in this answer. */
   drafts?: MessageDraft[];
+  /** User messages: web search was on. */
+  web?: boolean;
+  /** Assistant messages: the web searches the user allowed. */
+  webQueries?: string[];
   /** Assistant messages: pinned to the notes, with an optional own note. */
   pinned?: boolean;
   note?: string;
@@ -109,7 +113,13 @@ export type ProviderInfo = {
   /** Selectable reasoning efforts (empty if the CLI has none) and the configured default. */
   efforts: string[];
   defaultEffort: string | null;
+  /** Can search the web with an approval per query; if not, why (for a tooltip). */
+  webSearch: boolean;
+  webSearchNote: string | null;
 };
+
+/** The assistant wants to run a web search: the user allows (maybe with an edited query) or denies. */
+export type Approval = { id: string; kind: "web-search"; query: string; n: number };
 
 export type ToolEvent = { name: string; state: "active" | "done"; detail?: string };
 
@@ -220,6 +230,8 @@ export const api = {
     }
     return json<{ target: string; mode: string; version: string; removed: string[] }>(res);
   },
+  decideApproval: (o: ChatTarget, aid: string, body: { decision: "allow" | "deny"; query?: string }) =>
+    fetch(`${chatBase(o)}/approvals/${aid}`, send("POST", body)).then(json<{ ok: true }>),
   discardDraft: (o: ChatTarget, did: string) => fetch(`${chatBase(o)}/drafts/${did}`, send("DELETE")).then(json<{ ok: true; removed: string[] }>),
   renameNote: (o: ChatTarget, name: string, to: string) => fetch(noteUrl(o, name), send("PATCH", { name: to })).then(json<NoteInfo>),
   removeNote: (o: ChatTarget, name: string) => fetch(noteUrl(o, name), send("DELETE")).then(json<{ ok: true }>),
@@ -230,6 +242,9 @@ export type AskHandlers = {
   onDelta: (text: string) => void;
   onTool: (t: ToolEvent) => void;
   onDraft: (d: MessageDraft) => void;
+  onApproval: (a: Approval) => void;
+  /** Answered, timed out, or the answer stopped. */
+  onApprovalDone: (id: string) => void;
   onDone: (m: Message) => void;
 };
 
@@ -242,6 +257,8 @@ export async function ask(
     mode?: AskMode;
     /** review-note / challenge-note: which of the chat's notes, optionally which lines. */
     note?: { name: string; lines?: [number, number] };
+    /** Web search for this question, each query approved by the user. */
+    web?: boolean;
     secondOpinionOf?: string;
     draftId?: string;
     quote?: Quote;
@@ -279,6 +296,8 @@ export async function ask(
       else if (event === "delta") handlers.onDelta(payload);
       else if (event === "tool") handlers.onTool(payload);
       else if (event === "draft") handlers.onDraft(payload);
+      else if (event === "approval") handlers.onApproval(payload);
+      else if (event === "approval-done") handlers.onApprovalDone(payload.id);
       else if (event === "done") handlers.onDone(payload);
     }
   }
