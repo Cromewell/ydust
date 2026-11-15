@@ -97,6 +97,15 @@ npm start
 
 Then open <http://127.0.0.1:8787>.
 
+**Tests:**
+
+```bash
+npm test          # once (npm run test:watch to rerun on changes)
+npm run typecheck
+```
+
+The tests use [Vitest](https://vitest.dev) and need no AI CLI: they cover the forgiving text matching, the document tools (including the MCP server over stdio), the library store in a temporary folder, the prompts (as snapshots, in `test/__snapshots__/`) and the access checks of the API. After an intended prompt change, update the snapshots with `npx vitest run -u` and review the diff. CI runs typecheck, tests and build on Linux and Windows, with Node 22 and 20.19.
+
 ## Getting started
 
 1. **Add a PDF**: click *Add PDF* or drag files into the window. ydust reads the text of every page in the background (shown as *Reading pages…*). Keep the tab open until it's done.
