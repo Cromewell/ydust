@@ -198,3 +198,75 @@
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+/* Note editor (CodeMirror with classHighlighter's tok-* classes) */
+.note-editor .cm-editor {
+  height: 100%;
+  color: var(--color-zinc-800);
+}
+.note-editor .cm-cursor {
+  border-left-color: var(--color-violet-600);
+}
+.note-editor .cm-selectionBackground,
+.note-editor .cm-focused .cm-selectionBackground {
+  background: color-mix(in oklab, var(--color-violet-500) 22%, transparent) !important;
+}
+.note-editor .cm-placeholder {
+  color: var(--color-zinc-400);
+}
+.note-editor .tok-heading {
+  font-weight: 700;
+  color: var(--color-zinc-950);
+}
+.note-editor .tok-emphasis {
+  font-style: italic;
+}
+.note-editor .tok-strong {
+  font-weight: 700;
+}
+.note-editor .tok-link,
+.note-editor .tok-url {
+  color: var(--color-violet-600);
+}
+.note-editor .tok-monospace {
+  color: var(--color-pink-700);
+}
+.note-editor .tok-quote,
+.note-editor .tok-comment {
+  color: var(--color-zinc-500);
+}
+.note-editor .tok-meta,
+.note-editor .tok-processingInstruction,
+.note-editor .tok-punctuation {
+  color: var(--color-zinc-400);
+}
+.note-editor .tok-strikethrough {
+  text-decoration: line-through;
+}
+@media (prefers-color-scheme: dark) {
+  .note-editor .cm-editor {
+    color: var(--color-zinc-200);
+  }
+  .note-editor .cm-cursor {
+    border-left-color: var(--color-violet-400);
+  }
+  .note-editor .tok-heading {
+    color: var(--color-zinc-50);
+  }
+  .note-editor .tok-link,
+  .note-editor .tok-url {
+    color: var(--color-violet-400);
+  }
+  .note-editor .tok-monospace {
+    color: var(--color-pink-300);
+  }
+  .note-editor .tok-quote,
+  .note-editor .tok-comment {
+    color: var(--color-zinc-400);
+  }
+  .note-editor .tok-meta,
+  .note-editor .tok-processingInstruction,
+  .note-editor .tok-punctuation {
+    color: var(--color-zinc-500);
+  }
+}

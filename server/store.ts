@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export const LIBRARY_DIR = path.resolve(process.env.YDUST_LIBRARY ?? "library");
@@ -158,23 +158,29 @@ async function readJson<T>(file: string): Promise<T | null> {
 }
 
 /** Write atomically so a crash mid-write never leaves a half-written file. */
-async function writeJson(file: string, value: unknown) {
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(value, null, 2));
+export async function writeAtomic(file: string, data: string | Uint8Array) {
+  const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  await writeFile(tmp, data);
   // On Windows, a virus scanner or the search indexer may hold the target open for a moment.
   for (let attempt = 0; ; attempt++) {
     try {
       return await rename(tmp, file);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (attempt >= 5 || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "")) throw err;
+      if (attempt >= 5 || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "")) {
+        await rm(tmp, { force: true });
+        throw err;
+      }
       await new Promise((r) => setTimeout(r, 40 * (attempt + 1)));
     }
   }
 }
 
+const writeJson = (file: string, value: unknown) => writeAtomic(file, JSON.stringify(value, null, 2));
+
 const locks = new Map<string, Promise<unknown>>();
-function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+/** Run `fn` after every earlier call with the same key has finished. */
+export function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const next = (locks.get(key) ?? Promise.resolve()).then(fn);
   locks.set(key, next.catch(() => {}));
   return next;
@@ -394,6 +400,12 @@ export function setDocFolder(docId: string, folderId: string | null) {
 }
 
 // --- Chats: one per document, one per folder ---
+
+/** Does that chat (its document or folder) exist? Cheaper than reading it. */
+export async function chatExists(kind: ChatKind, id: string) {
+  if (!isValidId(id)) return false;
+  return !!(await stat(kind === "doc" ? metaPath(id) : folderMetaPath(id)).catch(() => null));
+}
 
 export function readChat(kind: ChatKind, id: string): Promise<(ChatData & { id: string; name: string }) | null> {
   return kind === "doc" ? readMeta(id) : readFolder(id);

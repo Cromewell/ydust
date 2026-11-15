@@ -80,6 +80,24 @@ export type ProviderInfo = {
 
 export type ToolEvent = { name: string; state: "active" | "done"; detail?: string };
 
+/** Whose notes: a document's or a folder's (notes/ in its folder). `alias` = the document's citation id. */
+export type NoteOwner = ChatTarget & { name: string; alias?: string };
+export type NoteInfo = { name: string; size: number; updatedAt: string; title: string | null };
+export type Note = NoteInfo & { content: string; version: string };
+export type SavedNote = NoteInfo & { version: string };
+
+/** A save refused because the note changed meanwhile; `current` is what it holds now (null: deleted). */
+export class NoteConflict extends Error {
+  constructor(
+    message: string,
+    readonly current: { content: string; version: string } | null,
+  ) {
+    super(message);
+  }
+}
+
+const noteUrl = (o: ChatTarget, name: string) => `${chatBase(o)}/notes/${encodeURIComponent(name)}`;
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => null);
@@ -137,6 +155,23 @@ export const api = {
   stop: (t: ChatTarget) => fetch(`${chatBase(t)}/stop`, send("POST")).then(json<{ ok: true }>),
   patchMessage: (t: ChatTarget, mid: string, body: { pinned?: boolean; note?: string }) =>
     fetch(`${chatBase(t)}/messages/${mid}`, send("PATCH", body)).then(json<Message>),
+
+  listNotes: (o: ChatTarget) => fetch(`${chatBase(o)}/notes`).then(json<NoteInfo[]>),
+  getNote: (o: ChatTarget, name: string) => fetch(noteUrl(o, name)).then(json<Note>),
+  /** Create (`baseVersion` null) or update a note; throws NoteConflict if it changed meanwhile. */
+  async saveNote(o: ChatTarget, name: string, content: string, baseVersion: string | null, opts: { keepalive?: boolean } = {}) {
+    const init = send("PUT", { content, baseVersion });
+    // Browsers refuse keepalive bodies over 64 KB; larger notes go as a normal request.
+    const keepalive = !!opts.keepalive && (init.body as string).length < 60_000;
+    const res = await fetch(noteUrl(o, name), { ...init, keepalive });
+    if (res.status === 409) {
+      const body = await res.json().catch(() => ({}));
+      throw new NoteConflict(body.error ?? "The note changed meanwhile.", body.current ?? null);
+    }
+    return json<SavedNote>(res);
+  },
+  renameNote: (o: ChatTarget, name: string, to: string) => fetch(noteUrl(o, name), send("PATCH", { name: to })).then(json<NoteInfo>),
+  removeNote: (o: ChatTarget, name: string) => fetch(noteUrl(o, name), send("DELETE")).then(json<{ ok: true }>),
 };
 
 export type AskHandlers = {

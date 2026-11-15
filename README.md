@@ -38,7 +38,9 @@
 - **Check my understanding**: select a passage → *Check me*, then explain it in your own words. You get feedback, hints and a follow-up question, not the full solution.
 - **Explanation level**: Beginner, Student, Advanced or Exam prep.
 - **Second opinion**: under every answer, *Ask Claude* / *Ask Antigravity* asks the other assistant the same question and lets it check the first answer.
-- **Notes**: pin answers to the *Notes* tab, add your own note to each, and export notes or the whole chat as Markdown.
+- **Notes**: write your own Markdown notes next to the PDF, with formulas (`$x^2$`, `$$\int f$$`) and page links (`[p. 12](#page=12)`) that work in the preview. Every PDF and every folder has its own notes; they are plain `.md` files you can also open in any other editor. Notes save themselves as you type, and a note changed in another editor meanwhile is never overwritten without asking.
+- **Add to note**: select a passage → *Add to note* quotes it with its page link (at the cursor, if a note is open). *Insert into note* under an answer adds the question, the passage and the answer.
+- **Pinned**: pin answers to the *Pinned* tab and add a comment to each. Export notes, pinned answers or the whole chat as Markdown.
 - **Discussed passages**: passages you asked about are tinted in the PDF with a small bubble. Click it to jump to the answer; click a quote in the chat to jump to the passage.
 
 **Study a whole course**
@@ -112,7 +114,7 @@ The tests use [Vitest](https://vitest.dev) and need no AI CLI: they cover the fo
 2. **Pick an assistant** at the top of the chat (Antigravity or Claude) and, if you like, a model.
 3. **Select a passage** in the PDF and choose *Explain*, *Summarize*, *Quiz me*, *Check me*, or *Ask* to type your own question (`Ctrl+K` does the same).
 4. **Or just ask** about the whole document in the chat, e.g. "Give me an overview of this document."
-5. **Click page citations** in answers to jump there. **Pin** good answers to your notes.
+5. **Click page citations** in answers to jump there. **Pin** good answers (Pinned tab), or put them into a note.
 
 Each PDF keeps its own conversation, also across restarts. *New chat* (top right of the chat) starts over.
 
@@ -137,6 +139,7 @@ To find the right places quickly, ydust gives the tutor a map of every document 
 | `S` | Snip a region of the page (when not typing) |
 | `Ctrl/Cmd + V` | Paste a picture into the chat |
 | `Enter` / `Shift + Enter` | Send / new line |
+| `Ctrl/Cmd + S` | Save the note now (in the note editor; it also saves by itself) |
 | `Esc` | Cancel snipping, dismiss the selection, or remove the attached quote |
 
 ## Privacy and security
@@ -147,6 +150,8 @@ To find the right places quickly, ydust gives the tutor a map of every document 
   - Both get ydust's own read-only document tools (`search`, `read_pages`, a small MCP server that can only read the documents of the current chat; which ones is decided by ydust, not by the model).
   - Claude Code only gets its read-only tools (`Read`, `Grep`, `Glob`) besides that; no other MCP servers.
   - Antigravity runs as a custom read-only agent whose only tool is `read_file`; writes, commands and URLs are additionally denied, and other MCP tools aren't approved.
+- **Notes** stay local too. They are in the chat's folder, which the assistant may read; it isn't pointed at them.
+- **No remote pictures.** Answers and notes never load pictures from the web (an image address could carry text out); a picture shows as a label instead.
 - **Local only.** The server listens on `127.0.0.1` and rejects requests from other websites, so a web page you visit can't use it through your browser. Keep it that way: the server drives an AI agent on your machine.
 
 ## Configuration
@@ -188,6 +193,7 @@ browser (React + pdf.js)  ──POST /api/…/ask──▶  Hono server (Node)  
 - **Prompts and settings never go on the command line**: the prompt goes in on stdin, and JSON (settings, MCP config) as files in the chat's `.agents/` folder. That avoids command-line length limits and, on Windows, quoting problems with `.cmd` shims. CLIs are started with [cross-spawn](https://github.com/moxystudio/node-cross-spawn) (finds `.exe` / `.cmd` via `PATHEXT`), and stopping an answer ends the whole process tree (`taskkill /T` on Windows).
 - **The prompt** contains the selected passage, the full text of that page, paths of attached pictures, the answer language and level, and your question. The first turn adds the tutor rules (cite pages as `[p. N](#page=N)`, …) and, in a folder, the list of documents with short ids (`d7`), text files and outlines. Other documents are cited as `[Name, p. N](#doc=d7&page=N)`. When a folder changes, the next turn tells the assistant what is in it now.
 - **Switching assistants**: the other assistant gets the messages it hasn't seen yet as context.
+- **Notes** are files in the chat's `notes/` folder, edited with CodeMirror and previewed with the same renderer as answers. Names are checked on the server (letters, digits, space, `.`, `_`, `-`, ending in `.md`, no paths, no names Windows reserves) and links aren't followed; a note is at most 1 MB, a chat has at most 200. Each save sends a hash of the version it started from: if the file changed in between (another tab, another editor), the server refuses with the current content and the editor asks which version to keep.
 
 **Antigravity** is started like this:
 
@@ -230,11 +236,13 @@ library/
 │   ├── outline.txt       bookmarks or page headings ("p. 12: Chapter 2")
 │   ├── meta.json         name, chat history, one session id per CLI
 │   ├── images/           pictures attached in this PDF's chat
+│   ├── notes/            your notes for this PDF, plain Markdown (summary.md, …)
 │   └── .agents/          written by ydust for the CLIs: Antigravity's read-only agent, settings and
 │                         document tools, Claude's MCP config
 ├── folders/<folder-id>/
 │   ├── folder.json       name, member documents, the folder chat
 │   ├── images/
+│   ├── notes/            notes for the whole folder
 │   └── .agents/
 └── state.json            next short document id
 ```

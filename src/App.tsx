@@ -15,13 +15,17 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppearanceMenu } from "./components/AppearanceMenu";
-import { ChatPanel, type Attachment, type ChatPanelHandle, type Streaming } from "./components/ChatPanel";
+import { ChatPanel, type Attachment, type ChatPanelHandle, type PanelTab, type Streaming } from "./components/ChatPanel";
+import { NotePicker, type Anchor } from "./components/NotePicker";
+import type { OpenNote } from "./components/NotesPanel";
 import { OutlinePanel } from "./components/OutlinePanel";
 import { PdfViewer, type Flash, type Mark, type PdfSelection, type SearchState, type Zoom } from "./components/PdfViewer";
 import { SearchBar, type SearchHit } from "./components/SearchBar";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { Sidebar } from "./components/Sidebar";
-import { api, ask, type Chat, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type ProviderInfo, type Quote } from "./lib/api";
+import { api, ask, type Chat, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
+import { questionOf } from "./lib/export";
+import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
 import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
 import type { TextSize } from "./lib/settings";
 import { findInString, snippet } from "./lib/textMatch";
@@ -143,6 +147,16 @@ export default function App() {
   const [showChat, setShowChat] = useState(true);
   const [dragging, setDragging] = useState(false);
   const chatRef = useRef<ChatPanelHandle>(null);
+
+  // --- Notes: the Notes tab, the note open in it, and the "which note?" picker ---
+  const [panelTab, setPanelTabState] = useState<PanelTab>(() => (store.get("panelTab") === "notes" ? "notes" : "chat"));
+  const setPanelTab = useCallback((t: PanelTab) => {
+    setPanelTabState(t);
+    store.set("panelTab", t);
+  }, []);
+  const [openNote, setOpenNote] = useState<OpenNote | null>(null);
+  const [notesRefresh, setNotesRefresh] = useState(0);
+  const [picker, setPicker] = useState<{ anchor: Anchor; title: string; block: (owner: NoteOwner) => string } | null>(null);
 
   const flash = useCallback((msg: string) => {
     setToast(msg);
@@ -411,6 +425,38 @@ export default function App() {
   const hasDoc = useCallback((alias: string) => docs.some((d) => d.alias === alias), [docs]);
   const docName = useCallback((id: string) => docs.find((d) => d.id === id)?.name, [docs]);
 
+  /** Whose notes the Notes tab shows: the open PDF's, then its folder's. */
+  const noteOwners = useMemo<NoteOwner[]>(() => {
+    const own = doc ? docs.find((d) => d.id === doc.id) : null;
+    const list: NoteOwner[] = [];
+    if (doc) list.push({ kind: "doc", id: doc.id, name: own?.name ?? doc.name, alias: own?.alias ?? doc.alias });
+    if (activeFolder) list.push({ kind: "folder", id: activeFolder.id, name: activeFolder.name });
+    return list;
+  }, [doc, docs, activeFolder]);
+
+  /** Put a block into a note; the note that is open in the editor gets it at its cursor. */
+  const addToNote = useCallback(
+    async (owner: NoteOwner, name: string, block: string, isNew = false) => {
+      await insertIntoNote(owner, name, block, { create: isNew });
+      setNotesRefresh((n) => n + 1);
+      const open = noteEditor.get();
+      if (!open || !sameOwner(open.owner, owner) || open.name !== name) flash(`Added to ${name}`);
+    },
+    [flash],
+  );
+  /** Straight into the open note if there is one (and it belongs here), otherwise ask which. */
+  const toNote = useCallback(
+    (anchor: Anchor, title: string, block: (owner: NoteOwner) => string) => {
+      const open = noteEditor.get();
+      if (open && panelTab === "notes" && showChat && noteOwners.some((o) => sameOwner(o, open.owner))) {
+        void addToNote(open.owner, open.name, block(open.owner)).catch((e) => flash(`Could not add it: ${(e as Error).message}`));
+      } else {
+        setPicker({ anchor, title, block });
+      }
+    },
+    [addToNote, panelTab, showChat, noteOwners, flash],
+  );
+
   const chatKeyOf = (c: Chat | ChatTarget) => `${c.kind}:${c.id}`;
   /** Append a message, but only if that chat is still the one on screen. */
   const pushMessage = (key: string, m: Message) =>
@@ -537,6 +583,30 @@ export default function App() {
   const secondOpinion = useCallback(
     (messageId: string, via: string) => void send("Second opinion", null, [], { secondOpinionOf: messageId, via }),
     [send],
+  );
+
+  /** "Insert into note" on an answer: its question as a heading, the passage it was about, the answer. */
+  const insertAnswer = useCallback(
+    (messageId: string, anchor: Anchor) => {
+      if (!chat) return;
+      const a = chat.messages.find((m) => m.id === messageId);
+      if (!a) return;
+      let q = questionOf(chat.messages, a);
+      // A second opinion repeats the question it is about.
+      if (q?.secondOpinionOf) q = questionOf(chat.messages, chat.messages.find((m) => m.id === q!.secondOpinionOf) ?? a) ?? q;
+      const from = { kind: chat.kind, id: chat.id, alias: chat.kind === "doc" ? docs.find((d) => d.id === chat.id)?.alias : undefined };
+      const heading = q && !q.secondOpinionOf ? q.content.split("\n")[0].trim().slice(0, 100) : "";
+      const block = (owner: NoteOwner) => {
+        const parts: string[] = [];
+        if (heading) parts.push(`### ${q?.mode === "check" ? "My explanation: " : ""}${heading}`);
+        const quoteDoc = q?.quote ? docs.find((d) => d.id === (q!.quote!.doc ?? chat.id)) : undefined;
+        if (q?.quote && quoteDoc) parts.push(quoteForNote(q.quote.text, pageLink(owner, q.quote.page, quoteDoc)));
+        parts.push(citationsFor(a.content.trim(), from, owner));
+        return parts.join("\n\n");
+      };
+      setPicker({ anchor, title: "Insert this answer into…", block });
+    },
+    [chat, docs],
   );
 
   const updateMessage = useCallback(
@@ -1092,6 +1162,13 @@ export default function App() {
             checkMode={checkMode}
             onCheckMode={setCheckMode}
             onSecondOpinion={secondOpinion}
+            tab={panelTab}
+            onTab={setPanelTab}
+            noteOwners={noteOwners}
+            openNote={openNote}
+            onOpenNote={setOpenNote}
+            notesRefresh={notesRefresh}
+            onInsertAnswer={insertAnswer}
             onPin={(mid, pinned) => void updateMessage(mid, { pinned })}
             onNote={(mid, note) => void updateMessage(mid, { note })}
             onLanguage={(l) => {
@@ -1118,6 +1195,26 @@ export default function App() {
             setCheckMode(true);
             askAboutSelection();
           }}
+          openNote={(() => {
+            const open = noteEditor.get();
+            return open && panelTab === "notes" && showChat && noteOwners.some((o) => sameOwner(o, open.owner)) ? open.name : null;
+          })()}
+          onAddToNote={(anchor) => {
+            const q = takeSelection();
+            const from = doc && docs.find((d) => d.id === doc.id);
+            if (!q || !from) return;
+            toNote(anchor, "Quote this passage in…", (owner) => quoteForNote(q.text, pageLink(owner, q.page, from)));
+          }}
+        />
+      )}
+
+      {picker && noteOwners.length > 0 && (
+        <NotePicker
+          owners={noteOwners}
+          anchor={picker.anchor}
+          title={picker.title}
+          onClose={() => setPicker(null)}
+          onPick={(owner, name, isNew) => addToNote(owner, name, picker.block(owner), isNew)}
         />
       )}
 
