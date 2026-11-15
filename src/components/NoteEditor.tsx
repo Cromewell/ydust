@@ -5,7 +5,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, drawSelection, keymap, placeholder } from "@codemirror/view";
 import { classHighlighter } from "@lezer/highlight";
 import clsx from "clsx";
-import { ArrowLeft, Columns2, Download, Eye, Loader2, Pencil, TriangleAlert } from "lucide-react";
+import { ArrowLeft, ChevronDown, Columns2, Download, Eye, GraduationCap, Loader2, Pencil, SearchCheck, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, NoteConflict, type NoteOwner } from "../lib/api";
 import { downloadText } from "../lib/export";
@@ -36,6 +36,8 @@ export default function NoteEditor({
   onJump,
   hasDoc,
   textSize,
+  onReview,
+  focusLine,
 }: {
   owner: NoteOwner;
   name: string;
@@ -45,6 +47,10 @@ export default function NoteEditor({
   onJump: (page: number, doc?: string, label?: string) => void;
   hasDoc: (alias: string) => boolean;
   textSize: TextSize;
+  /** Send the note (or the selected lines) to the assistant: review it, or challenge me on it. */
+  onReview?: (mode: "review-note" | "challenge-note", lines?: [number, number]) => void;
+  /** Show this line (a "[L12]" link in a review was clicked); `nonce` repeats a jump. */
+  focusLine?: { line: number; nonce: number } | null;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -120,7 +126,39 @@ export default function NoteEditor({
     }
     setPreview(content);
     setStatus("saved");
+    if (pendingLine.current) showLine(pendingLine.current);
   };
+
+  /** Select a line and scroll to it. */
+  const pendingLine = useRef<number | null>(null);
+  const showLine = (line: number) => {
+    const ed = view.current;
+    if (!ed || status === "loading" && !ed.state.doc.length) {
+      pendingLine.current = line;
+      return;
+    }
+    pendingLine.current = null;
+    const l = ed.state.doc.line(Math.min(Math.max(1, line), ed.state.doc.lines));
+    setMode((m) => (m === "preview" ? (wide ? "split" : "edit") : m));
+    ed.dispatch({ selection: { anchor: l.from, head: l.to }, effects: EditorView.scrollIntoView(l.from, { y: "center" }) });
+    ed.focus();
+  };
+  useEffect(() => {
+    if (focusLine) showLine(focusLine.line);
+  }, [focusLine?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** The lines of the selection, if something is selected. */
+  const selectedLines = (): [number, number] | undefined => {
+    const ed = view.current;
+    if (!ed) return undefined;
+    const { from, to } = ed.state.selection.main;
+    if (from === to) return undefined;
+    const a = ed.state.doc.lineAt(from).number;
+    let b = ed.state.doc.lineAt(to).number;
+    if (b > a && ed.state.doc.line(b).from === to) b--; // selection ends at the start of a line
+    return [a, b];
+  };
+  const [reviewMenu, setReviewMenu] = useState(false);
 
   // The editor itself, once per note.
   useEffect(() => {
@@ -173,6 +211,7 @@ export default function NoteEditor({
     const editor: OpenEditor = {
       owner,
       name,
+      flush: () => saveRef.current(),
       insert(block) {
         const { at, text, cursor } = blockInsertion(ed.state.doc.toString(), ed.state.selection.main.head, block);
         ed.dispatch({ changes: { from: at, insert: text }, selection: { anchor: cursor }, scrollIntoView: true });
@@ -305,6 +344,48 @@ export default function NoteEditor({
             </button>
           ))}
         </div>
+        {onReview && (
+          <div className="relative">
+            <button
+              onClick={() => setReviewMenu((v) => !v)}
+              aria-expanded={reviewMenu}
+              className="flex h-7 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-500/10"
+              title="Let the assistant check this note against the documents, or quiz you on it"
+            >
+              <SearchCheck className="size-3.5" /> Review <ChevronDown className="size-3" />
+            </button>
+            {reviewMenu && (
+              <div role="menu" className="animate-pop absolute right-0 z-20 mt-1 w-64 rounded-xl border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-700 dark:bg-zinc-900">
+                {(
+                  [
+                    ["review-note", SearchCheck, "Review", "What's wrong, imprecise or missing, with pages"],
+                    ["challenge-note", GraduationCap, "Challenge me", "Probing questions, no answers"],
+                  ] as const
+                ).map(([m, Icon, label, hint]) => (
+                  <button
+                    key={m}
+                    role="menuitem"
+                    onMouseDown={(e) => e.preventDefault()} // keep the editor's selection
+                    onClick={() => {
+                      setReviewMenu(false);
+                      onReview(m, selectedLines());
+                    }}
+                    className="flex w-full items-start gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    <Icon className="mt-0.5 size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    <span>
+                      <span className="block text-xs font-medium">
+                        {label}
+                        {selectedLines() ? " the selected lines" : ""}
+                      </span>
+                      <span className="block text-[11px] text-zinc-500">{hint}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <button onClick={() => downloadText(name, text())} className="icon-btn size-7" title="Download this note">
           <Download className="size-3.5" />
         </button>

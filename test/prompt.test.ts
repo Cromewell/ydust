@@ -114,6 +114,16 @@ describe("buildPrompt", () => {
     expect(out.endsWith("My explanation: It says the limit is unique.")).toBe(true);
   });
 
+  it("review of a note: numbered lines, line links, pages, no rewriting", () => {
+    const note = { name: "summary.md", content: "# Limits\nA limit is unique.\nEvery bounded sequence converges.", instructions: "Focus on definitions." };
+    expect(buildPrompt({ scope: alone, question: "Review my note “summary.md”.", firstTurn: false, noteTools: "write", mode: "review-note", note, language: "de" })).toMatchSnapshot();
+  });
+
+  it("challenge on selected lines of a folder's note", () => {
+    const note = { name: "course.md", content: "a\nb\nc\nd", lines: [2, 3] as [number, number] };
+    expect(buildPrompt({ scope: folder, question: "Challenge me on lines 2–3 of my note “course.md”.", firstTurn: false, mode: "challenge-note", note })).toMatchSnapshot();
+  });
+
   it("ignores unknown languages and levels", () => {
     const out = buildPrompt({ scope: alone, question: "q", firstTurn: false, language: "xx", level: "genius" });
     expect(out).toContain("Answer language: the language of my question.");

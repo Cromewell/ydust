@@ -10,7 +10,8 @@ import type { TextSize } from "../lib/settings";
 // CodeMirror is big: load it with the first note you open.
 const NoteEditor = lazy(() => import("./NoteEditor"));
 
-export type OpenNote = { owner: NoteOwner; name: string };
+/** The note in the editor; `line` + `nonce`: jump to that line (a "[L12]" link in a review). */
+export type OpenNote = { owner: NoteOwner; name: string; line?: number; nonce?: number };
 
 const ago = (iso: string) => {
   const s = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -30,6 +31,7 @@ export function NotesPanel({
   onJump,
   hasDoc,
   textSize,
+  onReview,
 }: {
   /** The open PDF first, then its folder (if any). */
   owners: NoteOwner[];
@@ -40,6 +42,7 @@ export function NotesPanel({
   onJump: (page: number, doc?: string, label?: string) => void;
   hasDoc: (alias: string) => boolean;
   textSize: TextSize;
+  onReview: (owner: NoteOwner, name: string, mode: "review-note" | "challenge-note", lines?: [number, number]) => void;
 }) {
   const [lists, setLists] = useState<Record<string, NoteInfo[] | "error">>({});
   const [tick, setTick] = useState(0);
@@ -82,6 +85,8 @@ export function NotesPanel({
           onJump={onJump}
           hasDoc={hasDoc}
           textSize={textSize}
+          onReview={(mode, lines) => onReview(open.owner, open.name, mode, lines)}
+          focusLine={open.line ? { line: open.line, nonce: open.nonce ?? 0 } : null}
         />
       </Suspense>
     );
