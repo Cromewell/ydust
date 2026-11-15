@@ -44,6 +44,35 @@ describe("Claude Code", () => {
   });
 });
 
+describe("Claude Code with web search on", () => {
+  const web = ydustServer(docs, { dir: "/lib/d1/notes", api: "http://127.0.0.1:8787", token: "t".repeat(64) }, { web: true });
+  const args = claudeArgs({ mcp: web.server, mcpTools: web.tools, web: true }, "/lib/d1/.agents/claude-mcp.json");
+
+  it("has WebSearch, but never pre-approved: every query asks ydust's approve tool", () => {
+    expect(values(args, "--tools")).toEqual(["Read", "Grep", "Glob", "WebSearch"]);
+    expect(values(args, "--allowedTools")).not.toContain("WebSearch");
+    expect(values(args, "--permission-prompt-tool")).toEqual(["mcp__ydust__approve"]);
+    expect(web.server.env.YDUST_WEB).toBe("1");
+    expect(web.tools).toContain("approve");
+  });
+
+  it("never pre-approves the approve tool itself, and never gets WebFetch", () => {
+    expect(values(args, "--allowedTools")).not.toContain("mcp__ydust__approve");
+    for (const t of ["WebFetch", "Bash", "Write", "Edit"]) expect(args).not.toContain(t);
+  });
+
+  it("without the toggle: no WebSearch, no permission prompt tool", () => {
+    const plain = claudeArgs({ mcp: turn.server, mcpTools: turn.tools }, "/x.json");
+    expect(plain).not.toContain("WebSearch");
+    expect(plain).not.toContain("--permission-prompt-tool");
+    expect(turn.tools).not.toContain("approve");
+  });
+
+  it("web search needs ydust's MCP server (no server, no search)", () => {
+    expect(claudeArgs({ web: true }, null)).not.toContain("WebSearch");
+  });
+});
+
 describe("Antigravity", () => {
   const settings = agySettings({ cwd: "/lib/d1", readDirs: ["/lib/d2"], mcp: turn.server, mcpTools: turn.tools });
 
@@ -72,7 +101,7 @@ describe("Antigravity", () => {
 describe("ydust's MCP server for a turn", () => {
   it("gets the notes folder, and the API and token only together", () => {
     expect(turn.server.env).toMatchObject({ YDUST_NOTES_DIR: "/lib/d1/notes", YDUST_API: "http://127.0.0.1:8787", YDUST_TURN_TOKEN: "t".repeat(64) });
-    expect(turn.tools).toEqual([...MCP_TOOLS]);
+    expect(turn.tools).toEqual(MCP_TOOLS.filter((t) => t !== "approve"));
     const noApi = ydustServer(docs, { dir: "/lib/d1/notes" });
     expect(noApi.server.env).not.toHaveProperty("YDUST_TURN_TOKEN");
     expect(noApi.tools).toEqual(["search", "read_pages", "list_highlights", "list_notes", "read_note"]);

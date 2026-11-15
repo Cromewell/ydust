@@ -45,6 +45,7 @@ export function chatMarkdown(chat: Chat, providers: ProviderInfo[], docName?: Do
       if (m.images?.length) out += `_(${m.images.length} picture${m.images.length > 1 ? "s" : ""} attached)_\n\n`;
     } else if (!m.error && m.content.trim()) {
       out += `**${who(m, providers)}:**\n\n${plainCitations(m.content)}\n\n`;
+      if (m.webQueries?.length) out += `_Web searches: ${m.webQueries.map((q) => `“${q}”`).join(", ")}_\n\n`;
       if (m.note) out += `> 📝 **My note:** ${m.note.replace(/\n/g, "\n> ")}\n\n`;
     }
   }

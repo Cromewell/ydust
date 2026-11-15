@@ -55,6 +55,10 @@ export type Message = {
   draftRef?: { id: string; target: string; revision: number };
   /** Assistant messages: note drafts proposed in this answer. */
   drafts?: MessageDraft[];
+  /** User messages: web search was on for this question. */
+  web?: boolean;
+  /** Assistant messages: the web searches the user allowed (with the query as it was run). */
+  webQueries?: string[];
   /** Assistant messages: pinned to the notes, with an optional own note. */
   pinned?: boolean;
   note?: string;

@@ -65,7 +65,7 @@ const MAX_OUTLINE = 200_000;
 const TOOLS_VERSION = 3;
 
 /** Where ydust's MCP server reaches this server (set by index.ts once it listens; tests set it too). */
-export const runtime = { apiBase: "" };
+export const runtime = { apiBase: "", approvalTimeoutMs: 5 * 60_000 };
 
 /** All API routes. server/index.ts serves it (tests call `app.request` without a port). */
 export const app = new Hono();
@@ -83,6 +83,12 @@ type Turn = {
   drafts: DraftInfo[];
   latest: Map<string, string>;
   emit: (event: string, data: unknown) => void;
+  /** Web search is on for this turn; the queries the user allowed; requests waiting for a click. */
+  web: boolean;
+  webQueries: string[];
+  approvals: Map<string, (d: { decision: "allow" | "deny"; query?: string; reason?: string }) => void>;
+  asked: number;
+  signal: AbortSignal;
 };
 const turns = new Map<string, Turn>();
 
@@ -146,7 +152,7 @@ app.get("/api/providers", async (c) =>
     await Promise.all(
       Object.values(PROVIDERS).map(async (p) => {
         const available = await p.available();
-        const base = { id: p.id, label: p.label, available, efforts: p.efforts };
+        const base = { id: p.id, label: p.label, available, efforts: p.efforts, webSearch: !!p.webSearch, webSearchNote: p.webSearchNote ?? null };
         if (!available) return { ...base, models: [], defaultModel: null, defaultEffort: null };
         const [models, defaultModel, defaultEffort] = await Promise.all([p.models(), p.defaultModel(), p.defaultEffort()]);
         return { ...base, models, defaultModel, defaultEffort };
@@ -178,6 +184,38 @@ app.post("/api/internal/drafts", async (c) => {
     if (err instanceof NoteError) return c.json({ error: err.message }, err.status);
     throw err;
   }
+});
+
+/**
+ * The approve tool (Claude Code's permission prompt) asks for a web search: shown to the user
+ * as a pop-up, answered by POST …/approvals/:aid. No answer within the timeout, or the turn
+ * stopped: denied.
+ */
+app.post("/api/internal/approvals", async (c) => {
+  if (c.req.header("origin") || c.req.header("sec-fetch-site")) return c.json({ error: "forbidden" }, 403);
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+  const turn = typeof body.token === "string" && body.token.length === 64 ? turns.get(body.token) : undefined;
+  if (!turn) return c.json({ error: "This conversation turn has ended." }, 403);
+  const query = typeof body.query === "string" ? body.query.trim().slice(0, 500) : "";
+  if (body.kind !== "web-search" || !turn.web || !query) return c.json({ decision: "deny", reason: "not-allowed" });
+  const id = randomBytes(8).toString("hex");
+  const decided = await new Promise<{ decision: "allow" | "deny"; query?: string; reason?: string }>((resolve) => {
+    const done = (d: { decision: "allow" | "deny"; query?: string; reason?: string }) => {
+      clearTimeout(timer);
+      turn.signal.removeEventListener("abort", onAbort);
+      turn.approvals.delete(id);
+      turn.emit("approval-done", { id, decision: d.decision });
+      resolve(d);
+    };
+    const onAbort = () => done({ decision: "deny", reason: "stopped" });
+    const timer = setTimeout(() => done({ decision: "deny", reason: "timeout" }), runtime.approvalTimeoutMs);
+    turn.signal.addEventListener("abort", onAbort, { once: true });
+    turn.approvals.set(id, done);
+    turn.asked++;
+    turn.emit("approval", { id, kind: "web-search", query, n: turn.asked });
+  });
+  if (decided.decision === "allow") turn.webQueries.push(decided.query ?? query);
+  return c.json(decided.decision === "allow" ? { decision: "allow", query: decided.query ?? query } : { decision: "deny", reason: decided.reason ?? "declined" });
 });
 
 // --- Documents ---
@@ -446,6 +484,20 @@ function chatRoutes(kind: ChatKind, base: string) {
     }),
   );
 
+  // The user's answer to a web search request (Allow, Edit + allow, Deny).
+  app.post(`${base}/:id/approvals/:aid`, async (c) => {
+    const id = c.req.param("id");
+    const aid = c.req.param("aid");
+    const { decision, query } = await c.req.json<{ decision?: unknown; query?: unknown }>().catch(() => ({}) as { decision?: unknown; query?: unknown });
+    if (decision !== "allow" && decision !== "deny") return c.json({ error: "`decision` must be allow or deny." }, 400);
+    const edited = typeof query === "string" ? query.trim().slice(0, 500) : undefined;
+    if (decision === "allow" && query !== undefined && !edited) return c.json({ error: "The search query is empty." }, 400);
+    const turn = [...turns.values()].find((t) => t.kind === kind && t.id === id && t.approvals.has(aid));
+    if (!turn) return c.json({ error: "That request is no longer waiting (answered, timed out, or the answer stopped)." }, 404);
+    turn.approvals.get(aid)!(decision === "allow" ? { decision, query: edited } : { decision, reason: "declined" });
+    return c.json({ ok: true });
+  });
+
   // --- Drafts (proposed by the assistant, waiting for the user) ---
 
   app.get(`${base}/:id/drafts`, notes(async (c, id) => c.json(await listDrafts(kind, id))));
@@ -516,6 +568,8 @@ function chatRoutes(kind: ChatKind, base: string) {
       draftId?: string;
       /** review-note / challenge-note: one of this chat's notes, optionally just some lines. */
       note?: { name?: unknown; lines?: unknown };
+      /** Web search for this question (approved query by query). */
+      web?: boolean;
     }>();
     const { model, effort, language, level, secondOpinionOf, provider: providerId = "agy" } = body;
     let { question, quote, images } = body;
@@ -561,6 +615,7 @@ function chatRoutes(kind: ChatKind, base: string) {
       images = asked.images;
       mode = asked.mode;
       noteRef = asked.noteRef;
+      body.web = asked.web && !!provider.webSearch; // a second opinion from a CLI without web search answers without it
       const prev = chat.messages[i];
       shownAlready.add(prev.id).add(asked.id);
       otherAnswer = { by: prev.provider && isProviderId(prev.provider) ? PROVIDERS[prev.provider].label : "another assistant", content: prev.content };
@@ -612,14 +667,34 @@ function chatRoutes(kind: ChatKind, base: string) {
     const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile, highlightsFile: highlightsPath(d.id) }));
     // …and the chat's notes; drafts come back here with this turn's token.
     // A review or challenge only reads: no write_note in that turn (fixes are asked for separately).
+    // Web search only where the CLI can ask for each query (and only if ydust can be reached).
     const token = randomBytes(32).toString("hex");
     const readOnly = mode === "review-note" || mode === "challenge-note";
-    const { server: mcp, tools: mcpTools } = ydustServer(searchable, { dir: notesDir(kind, id), ...(readOnly ? {} : { api: runtime.apiBase || undefined, token }) });
+    const web = body.web === true && !!provider.webSearch && !!runtime.apiBase;
+    if (body.web === true && !provider.webSearch) return c.json({ error: provider.webSearchNote ?? `${provider.label} can't search the web here.` }, 400);
+    const { server: mcp, tools: mcpTools } = ydustServer(
+      searchable,
+      { dir: notesDir(kind, id), api: runtime.apiBase || undefined, token, write: !readOnly },
+      { web },
+    );
 
     const controller = new AbortController();
     let finish!: () => void;
     running.set(key, { controller, done: new Promise<void>((r) => (finish = r)) });
-    const turn: Turn = { kind, id, provider: providerId, revises: revision ? { id: revision.id, target: revision.target } : null, drafts: [], latest: new Map(), emit: () => {} };
+    const turn: Turn = {
+      kind,
+      id,
+      provider: providerId,
+      revises: revision ? { id: revision.id, target: revision.target } : null,
+      drafts: [],
+      latest: new Map(),
+      emit: () => {},
+      web,
+      webQueries: [],
+      approvals: new Map(),
+      asked: 0,
+      signal: controller.signal,
+    };
     turns.set(token, turn);
     const release = () => {
       turns.delete(token);
@@ -638,6 +713,7 @@ function chatRoutes(kind: ChatKind, base: string) {
         secondOpinionOf: otherAnswer ? secondOpinionOf : undefined,
         draftRef: revision ? { id: revision.id, target: revision.target, revision: revision.revision } : undefined,
         noteRef,
+        web: web || undefined,
       });
       await updateChat(kind, id, (m) => void m.messages.push(userMsg));
       // Everything since this assistant's last answer (all of it, if it has no session here).
@@ -661,6 +737,7 @@ function chatRoutes(kind: ChatKind, base: string) {
         toolsIntro: !!sessionId && (chat.toolsVersion?.[providerId] ?? 0) < TOOLS_VERSION,
         revision,
         note: note && noteRef ? { ...note, instructions: noteRef.instructions } : undefined,
+        web,
         // What the other assistant discussed meanwhile is handed over as context
         // (everything, if this assistant starts a new session).
         history: unseen.filter((m) => (sessionId ? answeredBy(m) !== providerId : true) && !shownAlready.has(m.id)),
@@ -694,6 +771,7 @@ function chatRoutes(kind: ChatKind, base: string) {
           readDirs,
           mcp,
           mcpTools,
+          web,
           sessionId,
           model: cleanModel,
           signal: controller.signal,
@@ -726,6 +804,7 @@ function chatRoutes(kind: ChatKind, base: string) {
           modelLabel: usedModel ? await provider.describeModel(usedModel).catch(() => usedModel) : undefined,
           effort: cleanEffort ?? (await provider.defaultEffort().catch(() => null)) ?? undefined,
           drafts: turn.drafts.length ? turn.drafts.map(asMessageDraft) : undefined,
+          webQueries: turn.webQueries.length ? turn.webQueries : undefined,
         });
         await updateChat(kind, id, (m) => {
           m.messages.push(assistant!);

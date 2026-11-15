@@ -16,6 +16,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppearanceMenu } from "./components/AppearanceMenu";
 import { ChatPanel, type Attachment, type ChatPanelHandle, type PanelTab, type Streaming } from "./components/ChatPanel";
+import { ApprovalDialog } from "./components/ApprovalDialog";
 import { HighlightMenu } from "./components/HighlightMenu";
 import { HighlightsPanel, SideTabs, type SideTab } from "./components/HighlightsPanel";
 import { NotePicker, type Anchor } from "./components/NotePicker";
@@ -25,7 +26,7 @@ import { PdfViewer, type Flash, type HighlightClick, type Mark, type PdfSelectio
 import { SearchBar, type SearchHit } from "./components/SearchBar";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { Sidebar } from "./components/Sidebar";
-import { api, ask, HL_COLORS, type AskMode, type Chat, type Highlight, type HlColor, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
+import { api, ask, HL_COLORS, type Approval, type AskMode, type Chat, type Highlight, type HlColor, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
 import { downloadText, highlightsMarkdown, questionOf, safeFilename } from "./lib/export";
 import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
 import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
@@ -112,6 +113,9 @@ export default function App() {
   const [language, setLanguage] = useState(() => store.get("lang") ?? "auto");
   const [level, setLevel] = useState(() => store.get("level") ?? "auto");
   const [checkMode, setCheckMode] = useState(false);
+  /** Web search for the next question (off again after sending), and the searches waiting for a click. */
+  const [webOn, setWebOn] = useState(false);
+  const [approvals, setApprovals] = useState<{ target: ChatTarget; via: string; a: Approval }[]>([]);
 
   const [showOutline, setShowOutline] = useState(() => store.get("outline") === "1");
   const [sideTab, setSideTab] = useState<SideTab>(() => (store.get("sideTab") === "highlights" ? "highlights" : "contents"));
@@ -529,7 +533,7 @@ export default function App() {
       question: string,
       withQuote: Quote | null,
       withImages: Attachment[] = [],
-      opts: { mode?: AskMode; secondOpinionOf?: string; via?: string; draft?: MessageDraft; note?: { name: string; lines?: [number, number] } } = {},
+      opts: { mode?: AskMode; secondOpinionOf?: string; via?: string; draft?: MessageDraft; note?: { name: string; lines?: [number, number] }; web?: boolean } = {},
     ) => {
       if (!target || abortRef.current) return;
       const t = target;
@@ -571,6 +575,7 @@ export default function App() {
         secondOpinionOf: opts.secondOpinionOf,
         draftRef: opts.draft ? { id: opts.draft.id, target: opts.draft.target, revision: opts.draft.revision } : undefined,
         noteRef: opts.note ? { name: opts.note.name, lines: opts.note.lines, instructions: question.trim() || undefined } : undefined,
+        web: opts.web || undefined,
         createdAt: new Date().toISOString(),
       });
       let partial = "";
@@ -590,6 +595,7 @@ export default function App() {
             secondOpinionOf: opts.secondOpinionOf,
             draftId: opts.draft?.id,
             note: opts.note,
+            web: opts.web || undefined,
           },
           {
             onUser: (m) => pushMessage(key, m),
@@ -598,6 +604,8 @@ export default function App() {
               setStreaming((s) => (s ? { ...s, text: s.text + t } : s));
             },
             onTool: (t) => setStreaming((s) => (s ? { ...s, tools: [...s.tools, t] } : s)),
+            onApproval: (a) => setApprovals((list) => [...list, { target: t, via, a }]),
+            onApprovalDone: (id) => setApprovals((list) => list.filter((x) => x.a.id !== id)),
             onDraft: (d) => {
               setStreaming((s) => (s ? { ...s, drafts: [...s.drafts.filter((x) => x.id !== d.replaces), d] } : s));
               if (d.replaces) markDrafts(key, { [d.replaces]: { status: "superseded" } });
@@ -617,6 +625,7 @@ export default function App() {
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
         setStreaming(null);
+        setApprovals((list) => list.filter((x) => chatKeyOf(x.target) !== key));
         countMessages(t, 2);
       }
     },
@@ -1320,7 +1329,12 @@ export default function App() {
               store.set(`effort:${provider}`, e);
             }}
             onClearQuote={() => setQuote(null)}
-            onSend={(q) => void send(q, quote, attachments, { mode: checkMode ? "check" : undefined })}
+            onSend={(q) => {
+              void send(q, quote, attachments, { mode: checkMode ? "check" : undefined, web: webOn && providers.find((p) => p.id === provider)?.webSearch });
+              setWebOn(false);
+            }}
+            web={webOn}
+            onWeb={setWebOn}
             onStop={stop}
             onReset={reset}
             onJump={onCite}
@@ -1416,6 +1430,22 @@ export default function App() {
             />
           );
         })()}
+
+      {approvals[0] && (
+        <ApprovalDialog
+          key={approvals[0].a.id}
+          approval={approvals[0].a}
+          by={providers.find((p) => p.id === approvals[0].via)?.label ?? "The assistant"}
+          onDecide={async (decision, query) => {
+            const { target: t, a } = approvals[0];
+            try {
+              await api.decideApproval(t, a.id, { decision, query });
+            } finally {
+              setApprovals((list) => list.filter((x) => x.a.id !== a.id));
+            }
+          }}
+        />
+      )}
 
       {picker && noteOwners.length > 0 && (
         <NotePicker

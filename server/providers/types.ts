@@ -35,6 +35,8 @@ export type RunOptions = {
   /** ydust's tools as an MCP server, if any, and which of its tools this turn has. */
   mcp?: McpServer | null;
   mcpTools?: readonly string[];
+  /** This turn may search the web: every query goes through ydust's `approve` tool (the user decides). */
+  web?: boolean;
   sessionId?: string | null;
   model?: string | null;
   /** Reasoning effort, one of Provider.efforts. */
@@ -59,6 +61,12 @@ export interface Provider {
   describeModel(id: string): Promise<string>;
   /** Selectable reasoning effort levels (empty: not supported). */
   efforts: string[];
+  /**
+   * Web search with the user's approval per query (see RunOptions.web). Unset: not possible
+   * (`webSearchNote` says why, for the UI).
+   */
+  webSearch?: boolean;
+  webSearchNote?: string;
   /** Effort the CLI uses when none is chosen (from its settings), if known. */
   defaultEffort(): Promise<string | null>;
   available(): Promise<boolean>;

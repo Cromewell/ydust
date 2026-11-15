@@ -55,7 +55,7 @@ export function agySettings(opts: Pick<RunOptions, "cwd" | "readDirs" | "mcp" | 
     permissions: {
       allow: [
         ...[opts.cwd, ...(opts.readDirs ?? [])].map((d) => `read_file(${d})`),
-        ...(opts.mcp ? (opts.mcpTools ?? []).map((t) => `mcp(${MCP_NAME}/${t})`) : []),
+        ...(opts.mcp ? (opts.mcpTools ?? []).filter((t) => t !== "approve").map((t) => `mcp(${MCP_NAME}/${t})`) : []),
       ],
       deny: ["write_file(*)", "command(*)", "read_url(*)", "execute_url(*)", ...(opts.mcp ? [] : ["mcp(*)"])],
     },
@@ -195,6 +195,9 @@ export const agy: Provider = {
   defaultModel,
   describeModel,
   efforts: [],
+  // Headless agy can't ask for approval per action (only `agy acp` could), and its search_web
+  // can't be limited by permission rules: no web search rather than searches without a click.
+  webSearchNote: "Antigravity can't ask you to approve each search when it runs in the background, so web search is only available with Claude.",
   defaultEffort: async () => null,
   available,
 };

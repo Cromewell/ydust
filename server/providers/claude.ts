@@ -62,8 +62,14 @@ export function claudeArgs(opts: Omit<RunOptions, "prompt" | "onEvent" | "cwd">,
     "Read",
     "Grep",
     "Glob",
+    // Web turns: WebSearch exists but is not pre-approved, so every query asks ydust's `approve`
+    // tool, i.e. the user. (No WebFetch: pages are never opened.)
+    ...(opts.web && mcpConfig ? ["WebSearch"] : []),
   ];
-  if (mcpConfig && opts.mcpTools?.length) args.push("--allowedTools", ...opts.mcpTools.map((t) => `mcp__${MCP_NAME}__${t}`));
+  if (opts.web && mcpConfig) args.push("--permission-prompt-tool", `mcp__${MCP_NAME}__approve`);
+  // ydust's tools are pre-approved, except `approve` itself (the CLI calls it, not the model).
+  const approved = (opts.mcpTools ?? []).filter((t) => t !== "approve");
+  if (mcpConfig && approved.length) args.push("--allowedTools", ...approved.map((t) => `mcp__${MCP_NAME}__${t}`));
   for (const d of opts.readDirs ?? []) args.push("--add-dir", d);
   if (opts.sessionId) args.push("--resume", opts.sessionId);
   if (opts.model) args.push("--model", opts.model);
@@ -246,5 +252,6 @@ export const claude: Provider = {
   describeModel,
   efforts: EFFORTS,
   defaultEffort,
+  webSearch: true,
   available,
 };

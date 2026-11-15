@@ -10,13 +10,18 @@
  *   read_note(name)                the text of one note
  *   write_note(name, content,      proposes a draft for the user to review; never writes the
  *              mode, summary)      note itself (ydust stores the draft, the user accepts it)
+ *   approve(tool_name, input)      Claude Code's permission prompt (web turns): allows nothing but
+ *                                  a WebSearch whose query the user approved in the app
  *
  * What it may touch comes from ydust, never from the model:
  *   YDUST_DOCS        JSON array of { alias, name, textFile } (the first is the default document)
  *   YDUST_NOTES_DIR   the chat's notes folder (read only)
- *   YDUST_API, YDUST_TURN_TOKEN   where to hand drafts to ydust, valid while this turn runs
+ *   YDUST_API, YDUST_TURN_TOKEN   where to hand drafts and approvals to ydust, valid while this turn runs
+ *   YDUST_NOTES_WRITE=0   this turn may not draft notes (a review)
+ *   YDUST_WEB=1       this turn may search the web, query by query (adds `approve`)
  */
 import { readFile } from "node:fs/promises";
+import http from "node:http";
 import { createInterface } from "node:readline";
 import { findInString, fold } from "../../src/lib/textMatch.ts";
 import { readHighlightsFile } from "../highlights.ts";
@@ -228,7 +233,8 @@ const DOC_TOOLS = [
 
 // --- Notes ---
 
-export type NotesScope = { dir: string; api?: string; token?: string };
+/** The chat's notes; `api` + `token` reach ydust (drafts, approvals); `write: false` = no drafts this turn. */
+export type NotesScope = { dir: string; api?: string; token?: string; write?: boolean };
 const MAX_NOTE_READ = 100_000;
 
 const kb = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
@@ -320,15 +326,81 @@ const WRITE_TOOL = {
   },
 };
 
-/** The tools available with these documents and notes. */
-export function toolsFor(docs: ScopeDoc[], notes: NotesScope | null) {
-  return [...(docs.length ? DOC_TOOLS : []), ...(notes ? NOTE_TOOLS : []), ...(notes?.api && notes.token ? [WRITE_TOOL] : [])];
+// --- Web search approval (Claude Code's --permission-prompt-tool) ---
+
+/** POST JSON and wait for the answer: node:http, because fetch gives up after 5 minutes without a reply. */
+function postJson(url: string, body: unknown): Promise<{ status: number; json: any }> {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = http.request(url, { method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => (text += c));
+      res.on("end", () => {
+        try {
+          resolve({ status: res.statusCode ?? 0, json: JSON.parse(text) });
+        } catch {
+          resolve({ status: res.statusCode ?? 0, json: {} });
+        }
+      });
+    });
+    req.on("error", reject);
+    // ydust answers within 5 minutes; this only guards against a server that hangs.
+    req.setTimeout(6 * 60_000, () => req.destroy(new Error("no answer from ydust")));
+    req.end(data);
+  });
+}
+
+const deny = (message: string) => JSON.stringify({ behavior: "deny", message });
+
+/**
+ * Claude Code asks this before any tool that isn't pre-approved. Only a WebSearch can be
+ * allowed, and only by the user (in the app, possibly with an edited query); everything else
+ * is denied at once.
+ */
+export async function approveTool(scope: NotesScope, args: { tool_name?: unknown; input?: unknown }): Promise<string> {
+  if (args.tool_name !== "WebSearch") return deny(`${typeof args.tool_name === "string" ? args.tool_name : "That tool"} is not available in ydust.`);
+  const input = (args.input && typeof args.input === "object" ? args.input : {}) as Record<string, unknown>;
+  const query = typeof input.query === "string" ? input.query.trim() : "";
+  if (!query) return deny("Empty search query.");
+  if (!scope.api || !scope.token) return deny("Web search is not available in this conversation.");
+  try {
+    const r = await postJson(`${scope.api}/api/internal/approvals`, { token: scope.token, kind: "web-search", query });
+    if (r.status !== 200) return deny(`ydust couldn't ask the user (status ${r.status}).`);
+    const approved = typeof r.json.query === "string" ? r.json.query.trim() : "";
+    // Exactly what the user saw and allowed: the query, nothing else the model put into the input.
+    if (r.json.decision === "allow" && approved) return JSON.stringify({ behavior: "allow", updatedInput: { query: approved } });
+    return deny(
+      r.json.reason === "timeout"
+        ? "The user didn't answer the request to search the web. Answer from the documents, and say what a search could have added."
+        : "The user declined this web search. Answer from the documents (say so if they don't cover it), or ask the user before searching for something else.",
+    );
+  } catch (err) {
+    return deny(`ydust is not reachable (${(err as Error).message}).`);
+  }
+}
+
+const APPROVE_TOOL = {
+  name: "approve",
+  description: "Permission prompt for ydust (used by the CLI, not by you).",
+  inputSchema: { type: "object", properties: { tool_name: { type: "string" }, input: { type: "object" }, tool_use_id: { type: "string" } }, required: ["tool_name", "input"] },
+};
+
+/** The tools available with these documents and notes (and web search, for a web turn). */
+export function toolsFor(docs: ScopeDoc[], notes: NotesScope | null, opts: { web?: boolean } = {}) {
+  const reach = !!(notes?.api && notes.token);
+  return [
+    ...(docs.length ? DOC_TOOLS : []),
+    ...(notes ? NOTE_TOOLS : []),
+    ...(reach && notes!.write !== false ? [WRITE_TOOL] : []),
+    ...(reach && opts.web ? [APPROVE_TOOL] : []),
+  ];
 }
 
 // --- JSON-RPC over stdio ---
 
-function serve(docs: ScopeDoc[], notes: NotesScope | null) {
-  const tools = toolsFor(docs, notes);
+function serve(docs: ScopeDoc[], notes: NotesScope | null, web: boolean) {
+  const tools = toolsFor(docs, notes, { web });
   const has = (name: string) => tools.some((t) => t.name === name);
   const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
   createInterface({ input: process.stdin }).on("line", async (line) => {
@@ -356,6 +428,7 @@ function serve(docs: ScopeDoc[], notes: NotesScope | null) {
         const args = req.params?.arguments ?? {};
         try {
           if (typeof name !== "string" || !has(name)) return reply({ content: [{ type: "text", text: `Unknown tool ${name}` }], isError: true });
+          if (name === "approve") return reply({ content: [{ type: "text", text: await approveTool(notes!, args) }] });
           if (name === "write_note") {
             const r = await writeNoteTool(notes!, args);
             return reply({ content: [{ type: "text", text: r.text }], ...(r.error ? { isError: true } : {}) });
@@ -396,7 +469,7 @@ function scopeFromEnv(): ScopeDoc[] {
 function notesFromEnv(): NotesScope | null {
   const dir = process.env.YDUST_NOTES_DIR;
   if (!dir) return null;
-  return { dir, api: process.env.YDUST_API || undefined, token: process.env.YDUST_TURN_TOKEN || undefined };
+  return { dir, api: process.env.YDUST_API || undefined, token: process.env.YDUST_TURN_TOKEN || undefined, write: process.env.YDUST_NOTES_WRITE !== "0" };
 }
 
-if (process.env.YDUST_DOCS !== undefined || process.env.YDUST_NOTES_DIR !== undefined) serve(scopeFromEnv(), notesFromEnv());
+if (process.env.YDUST_DOCS !== undefined || process.env.YDUST_NOTES_DIR !== undefined) serve(scopeFromEnv(), notesFromEnv(), process.env.YDUST_WEB === "1");
