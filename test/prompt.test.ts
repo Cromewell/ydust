@@ -157,3 +157,20 @@ describe("scopeSignature", () => {
     expect(scopeSignature({ ...folder, docs: docs.map((d) => ({ ...d, outline: "changed" })) } as Scope)).toBe(scopeSignature(folder));
   });
 });
+
+describe("answer language and level", () => {
+  const doc = { id: "x", alias: "d1", name: "Doc", pages: 1, hasText: true, textFile: "/t", outlineFile: null };
+  const scope: Scope = { kind: "doc", doc, folder: null };
+
+  it("ignores keys that aren't languages or levels (constructor, toString)", () => {
+    const p = buildPrompt({ scope, question: "hi", firstTurn: false, language: "constructor", level: "toString" });
+    expect(p).toContain("Answer language: the language of my question.");
+    expect(p).not.toContain("native code");
+    expect(p).not.toContain("Explanation level");
+  });
+
+  it("follows the document for the app's built-in English prompts", () => {
+    expect(buildPrompt({ scope, question: "Explain", firstTurn: false, preset: true })).toContain("Answer language: the language of the document (");
+    expect(buildPrompt({ scope, question: "Explain", firstTurn: false, preset: true, language: "de" })).toContain("Answer language: German");
+  });
+});

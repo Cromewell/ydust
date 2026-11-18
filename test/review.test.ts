@@ -100,7 +100,7 @@ describe("reviewing a note", () => {
   });
 
   it("a second opinion reviews the same note again", async () => {
-    const meta = (await store.readMeta(doc))!;
+    const meta = (await store.readChat("doc", doc))!;
     const answer = meta.messages.findLast((m) => m.role === "assistant")!;
     const before = prompts.length;
     const r = await ask(`/api/docs/${doc}/ask`, { question: "Second opinion", secondOpinionOf: answer.id, provider: "agy" });

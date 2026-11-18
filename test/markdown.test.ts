@@ -19,6 +19,26 @@ describe("normalizeMath", () => {
   it("converts \\( \\) and \\[ \\]", () => {
     expect(normalizeMath("\\(x\\) and \\[y\\]")).toBe("$x$ and $$y$$");
   });
+
+  it("leaves fenced code alone", () => {
+    const src = "```js\nconst re = /\\(\\d+\\)/;\nconst d = '\\[x\\]';\n```\nand \\(y\\)";
+    expect(normalizeMath(src)).toBe("```js\nconst re = /\\(\\d+\\)/;\nconst d = '\\[x\\]';\n```\nand $y$");
+    expect(normalizeMath("~~~\n$$x$$\n~~~")).toBe("~~~\n$$x$$\n~~~");
+  });
+
+  it("leaves an unclosed fence alone (an answer still streaming)", () => {
+    expect(normalizeMath("text \\(a\\)\n```tex\n\\(b\\)")).toBe("text $a$\n```tex\n\\(b\\)");
+  });
+
+  it("leaves inline code alone, also with longer backtick runs", () => {
+    expect(normalizeMath("write `\\(x\\)` for $x$, or ``a `\\[y\\]` b``")).toBe("write `\\(x\\)` for $x$, or ``a `\\[y\\]` b``");
+  });
+
+  it("still converts math next to code", () => {
+    expect(normalizeMath("`c`\n$$ a = b $$\nso \\[z\\]")).toBe("`c`\n$$\na = b\n$$\nso $$z$$");
+    // A lone backtick doesn't swallow the next paragraph.
+    expect(normalizeMath("it's a ` here\n\nand `\\(q\\)")).toBe("it's a ` here\n\nand `$q$");
+  });
 });
 
 describe("Markdown", () => {

@@ -1,10 +1,10 @@
-import spawn from "cross-spawn";
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline";
 import { MCP_NAME } from "../mcp/launch.ts";
-import { cached, cliFile, killTree, runLines, runQuick, writeFileIfChanged, type AgentResult, type Model, type Provider, type RunOptions } from "./types.ts";
+import { SYSTEM_RULES } from "../prompt.ts";
+import { LIBRARY_DIR, writeAtomic } from "../store.ts";
+import { cached, cliFile, runLines, runQuick, writeFileIfChanged, type AgentResult, type Model, type Provider, type RunOptions } from "./types.ts";
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 
@@ -44,8 +44,16 @@ function cleanEnv() {
  * write_note only proposes drafts); in "default" permission mode anything outside the
  * working directory and the added folders is denied.
  */
+/** Options that not every Claude Code version knows (see `features`). */
+export type ClaudeFeatures = {
+  /** "manual" is the current name of the "default" permission mode (which still works, unlisted). */
+  manualMode?: boolean;
+  /** File with ydust's tutor rules for --append-system-prompt-file, if this version has it. */
+  systemPromptFile?: string | null;
+};
+
 /** Claude Code's command line for a turn (`mcpConfig`: the file with ydust's MCP server). */
-export function claudeArgs(opts: Omit<RunOptions, "prompt" | "onEvent" | "cwd">, mcpConfig: string | null): string[] {
+export function claudeArgs(opts: Omit<RunOptions, "prompt" | "onEvent" | "cwd">, mcpConfig: string | null, features: ClaudeFeatures = {}): string[] {
   const mcpArgs = mcpConfig ? ["--mcp-config", mcpConfig] : [];
   const args = [
     "--print",
@@ -54,7 +62,7 @@ export function claudeArgs(opts: Omit<RunOptions, "prompt" | "onEvent" | "cwd">,
     "--verbose",
     "--include-partial-messages",
     "--permission-mode",
-    "default",
+    features.manualMode ? "manual" : "default",
     // Only ydust's own MCP server (if any), and only its tools are pre-approved.
     "--strict-mcp-config",
     ...mcpArgs,
@@ -70,6 +78,8 @@ export function claudeArgs(opts: Omit<RunOptions, "prompt" | "onEvent" | "cwd">,
   // ydust's tools are pre-approved, except `approve` itself (the CLI calls it, not the model).
   const approved = (opts.mcpTools ?? []).filter((t) => t !== "approve");
   if (mcpConfig && approved.length) args.push("--allowedTools", ...approved.map((t) => `mcp__${MCP_NAME}__${t}`));
+  // The tutor rules as part of the system prompt, so they outlast the automatic compaction of long chats.
+  if (features.systemPromptFile) args.push("--append-system-prompt-file", features.systemPromptFile);
   for (const d of opts.readDirs ?? []) args.push("--add-dir", d);
   if (opts.sessionId) args.push("--resume", opts.sessionId);
   if (opts.model) args.push("--model", opts.model);
@@ -84,7 +94,13 @@ async function run(opts: RunOptions): Promise<AgentResult> {
     mcpConfig = cliFile(opts.cwd, "claude-mcp.json");
     await writeFileIfChanged(mcpConfig, JSON.stringify({ mcpServers: { [MCP_NAME]: { type: "stdio", ...opts.mcp } } }, null, 2));
   }
-  const args = claudeArgs(opts, mcpConfig);
+  const has = await features();
+  let systemPromptFile: string | null = null;
+  if (has.systemPromptFile) {
+    systemPromptFile = cliFile(opts.cwd, "claude-system.md");
+    await writeFileIfChanged(systemPromptFile, SYSTEM_RULES);
+  }
+  const args = claudeArgs(opts, mcpConfig, { manualMode: has.manualMode, systemPromptFile });
 
   let sessionId = opts.sessionId ?? null;
   let response = "";
@@ -94,6 +110,7 @@ async function run(opts: RunOptions): Promise<AgentResult> {
   let isError = false;
   let resultError: string | null = null;
   let gotResult = false;
+  let resumeFailed = false;
   let denied: string[] = [];
   let model: string | null = null;
   const toolNames = new Map<string, string>();
@@ -144,13 +161,19 @@ async function run(opts: RunOptions): Promise<AgentResult> {
         sessionId = e.session_id ?? sessionId;
         isError = !!e.is_error || (e.subtype && e.subtype !== "success");
         finalText = typeof e.result === "string" ? e.result : "";
-        if (isError) resultError = finalText || `Claude stopped (${e.subtype ?? "error"}).`;
+        const errors: string[] = Array.isArray(e.errors) ? e.errors.filter((x: unknown): x is string => typeof x === "string") : [];
+        if (isError) resultError = finalText || errors.join("\n") || `Claude stopped (${e.subtype ?? "error"}).`;
+        // `--resume` with a session that is gone (e.g. Claude Code was reinstalled).
+        if (opts.sessionId && errors.some((x) => /no conversation found/i.test(x))) resumeFailed = true;
         denied = (e.permission_denials ?? []).map((d: any) => d.tool_name).filter(Boolean);
       }
     },
   );
 
+  if (model) void remember(opts.model ?? "", model);
   if (aborted) return { sessionId, response, status: "ABORTED", denied, error: null, model };
+  if (opts.sessionId && !response.trim() && /no conversation found/i.test(stderr)) resumeFailed = true;
+  if (resumeFailed) return { sessionId: null, response: "", status: "ERROR", denied, error: resultError ?? stderr.trim(), model, resumeFailed };
   if (!gotResult) return { sessionId, response, status: "ERROR", denied, error: stderr.trim() || `claude exited with code ${code}`, model };
   if (isError) return { sessionId, response, status: "ERROR", denied, error: resultError, model };
   return { sessionId, response: response.trim() ? response : finalText, status: "SUCCESS", denied, error: null, model };
@@ -172,61 +195,60 @@ export function prettyClaude(id: string) {
   return words.join(" ");
 }
 
-/**
- * Which full model an alias (or the default, "") stands for. Claude Code has no "list
- * models" command, but its first stream-json line (the init event) names the resolved
- * model, so we start it and kill it right there — no session is saved.
- */
-function resolveModel(alias: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const args = ["--print", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--tools", "", "--strict-mcp-config"];
-    if (alias) args.push("--model", alias);
-    const child = spawn(CLAUDE_BIN, args, { env: cleanEnv(), windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
-    let found: string | null = null;
-    const timer = setTimeout(() => killTree(child, true), 20_000);
-    child.on("error", () => resolve(null));
-    child.stdin!.on("error", () => {});
-    child.stdin!.end("x");
-    createInterface({ input: child.stdout! }).on("line", (line) => {
-      try {
-        const e = JSON.parse(line);
-        if (e.type === "system" && e.subtype === "init") {
-          found = typeof e.model === "string" ? e.model : null;
-          killTree(child, true);
-        }
-      } catch {}
-    });
-    child.on("close", () => {
-      clearTimeout(timer);
-      resolve(found);
-    });
-  });
+// Claude Code accepts aliases that always point at the latest model of each family. It has no
+// "list models" command: the full id behind an alias is learned from the answers (their init
+// event names the model) and remembered, so the picker can show real names.
+const ALIASES = ["opus", "sonnet", "haiku", "fable"];
+const LEARNED_FILE = path.join(LIBRARY_DIR, "claude-models.json");
+let learned: Promise<Record<string, string>> | null = null;
+const learnedModels = () => (learned ??= readFile(LEARNED_FILE, "utf8").then((t) => JSON.parse(t) as Record<string, string>, () => ({}) as Record<string, string>));
+
+/** `alias` ("" = the default) answered with `id`. */
+async function remember(alias: string, id: string) {
+  const all = await learnedModels();
+  if (all[alias] === id) return;
+  all[alias] = id;
+  await writeAtomic(LEARNED_FILE, JSON.stringify(all, null, 2)).catch(() => {});
 }
 
-// Claude Code accepts aliases that always point at the latest model of each family.
-const ALIASES = ["opus", "sonnet", "haiku", "fable"];
-const resolved = cached(30 * 60_000, async () => {
-  const ids = await Promise.all(["", ...ALIASES].map(resolveModel));
-  return { default: ids[0], aliases: ALIASES.map((a, i) => ({ alias: a, id: ids[i + 1] })) };
-});
-
-const models = async (): Promise<Model[]> =>
-  (await resolved()).aliases.map(({ alias, id }) => ({
+const models = async (): Promise<Model[]> => {
+  const known = await learnedModels();
+  return ALIASES.map((alias) => ({
     id: alias,
-    label: id ? prettyClaude(id) : `${alias.charAt(0).toUpperCase()}${alias.slice(1)} (latest)`,
-    detail: id ?? alias,
+    label: known[alias] ? prettyClaude(known[alias]) : `${alias.charAt(0).toUpperCase()}${alias.slice(1)} (latest)`,
+    detail: known[alias] ?? alias,
   }));
+};
 
 async function defaultModel(): Promise<Model | null> {
-  const id = (await resolved()).default;
+  const id = (await learnedModels())[""];
   return id ? { id: "", label: prettyClaude(id), detail: id } : null;
 }
 
 async function describeModel(id: string) {
-  // Aliases resolve to full ids; full ids are prettified directly.
-  const alias = (await resolved()).aliases.find((a) => a.alias === id);
-  return prettyClaude(alias?.id ?? id);
+  // Aliases stand for the full id last seen; full ids are prettified directly.
+  return prettyClaude((await learnedModels())[id] ?? id);
 }
+
+/**
+ * Does this claude accept these options? Asked without any input, so it stops right after
+ * reading its command line ("Input must be provided"), before any request.
+ */
+async function accepts(args: string[]) {
+  const r = await runQuick(CLAUDE_BIN, ["--print", "--tools", "", "--strict-mcp-config", "--no-session-persistence", ...args], { timeout: 20_000, env: cleanEnv(), cwd: tmpdir() });
+  return !r.notFound && !/unknown option|invalid|error: option/i.test(r.stderr + r.stdout) && /input must be provided/i.test(r.stderr + r.stdout);
+}
+const features = cached(10 * 60_000, async () => {
+  // Our own file (another user's ydust on a shared computer may probe at the same time).
+  const probe = path.join(tmpdir(), `ydust-claude-probe-${process.pid}.md`);
+  await writeFile(probe, "probe\n").catch(() => {});
+  try {
+    const [manualMode, systemPromptFile] = await Promise.all([accepts(["--permission-mode", "manual"]), accepts(["--append-system-prompt-file", probe])]);
+    return { manualMode, systemPromptFile };
+  } finally {
+    await rm(probe, { force: true });
+  }
+});
 
 const available = cached(60_000, async () => (await runQuick(CLAUDE_BIN, ["--version"], { timeout: 10_000, env: cleanEnv() })).ok);
 

@@ -140,7 +140,7 @@ describe("write_note → draft → review", () => {
     expect(res.status).toBe(200);
     expect(await readFile(path.join(notesDir("doc", doc), "Exercises.md"), "utf8")).toBe("# Exercises\n\n1. Show $a_n \\to 0$.");
     expect(await exists(path.join(draftsDir("doc", doc), `${d.id}.json`))).toBe(false);
-    const meta = (await store.readMeta(doc))!;
+    const meta = (await store.readChat("doc", doc))!;
     expect(meta.messages.flatMap((m) => m.drafts ?? []).find((x) => x.id === d.id)).toMatchObject({ status: "accepted", acceptedAs: "Exercises.md" });
     expect((await req("POST", `/api/docs/${doc}/drafts/${d.id}/accept`, {})).status).toBe(404);
   });
@@ -198,7 +198,7 @@ describe("write_note → draft → review", () => {
     expect((await req("DELETE", `/api/docs/${doc}/drafts/${d.id}`)).status).toBe(200);
     expect(await readFile(path.join(notesDir("doc", doc), "Exercises.md"), "utf8")).toBe(before);
     expect(await readdir(draftsDir("doc", doc))).toEqual([]);
-    const meta = (await store.readMeta(doc))!;
+    const meta = (await store.readChat("doc", doc))!;
     expect(meta.messages.flatMap((m) => m.drafts ?? []).find((x) => x.id === d.id)?.status).toBe("discarded");
   });
 
@@ -228,7 +228,7 @@ describe("write_note → draft → review", () => {
     expect((await req("POST", `/api/docs/${doc}/drafts/${v2.id}/accept`, {})).status).toBe(200);
     expect(await readFile(path.join(notesDir("doc", doc), "Cheat sheet.md"), "utf8")).toBe("# Cheat sheet\n\nv2");
     expect(await readdir(draftsDir("doc", doc))).toEqual([]);
-    const drafts = (await store.readMeta(doc))!.messages.flatMap((m) => m.drafts ?? []);
+    const drafts = (await store.readChat("doc", doc))!.messages.flatMap((m) => m.drafts ?? []);
     expect(drafts.find((x) => x.id === v1.id)?.status).toBe("superseded");
     expect(drafts.find((x) => x.id === v2.id)?.status).toBe("accepted");
   });

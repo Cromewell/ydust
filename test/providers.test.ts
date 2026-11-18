@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MCP_TOOLS, ydustServer } from "../server/mcp/launch.ts";
 import { agySettings } from "../server/providers/agy.ts";
 import { claudeArgs } from "../server/providers/claude.ts";
+import { runLines } from "../server/providers/types.ts";
 
 // The promise in the README: the assistant reads, and proposes notes only as drafts.
 // These tests pin down what each CLI is allowed to do.
@@ -35,6 +36,13 @@ describe("Claude Code", () => {
     expect(values(args, "--allowedTools")).toEqual(["mcp__ydust__search", "mcp__ydust__read_pages", "mcp__ydust__list_highlights", "mcp__ydust__list_notes", "mcp__ydust__read_note", "mcp__ydust__write_note"]);
     expect(args).toContain("--strict-mcp-config");
     expect(values(args, "--permission-mode")).toEqual(["default"]);
+  });
+
+  it("uses the current name of the permission mode, and the rules file, where the CLI has them", () => {
+    const newer = claudeArgs({ mcp: turn.server, mcpTools: turn.tools }, "/x.json", { manualMode: true, systemPromptFile: "/lib/d1/.agents/claude-system.md" });
+    expect(values(newer, "--permission-mode")).toEqual(["manual"]);
+    expect(values(newer, "--append-system-prompt-file")).toEqual(["/lib/d1/.agents/claude-system.md"]);
+    expect(args).not.toContain("--append-system-prompt-file");
   });
 
   it("without ydust's server, approves nothing", () => {
@@ -109,5 +117,16 @@ describe("ydust's MCP server for a turn", () => {
 
   it("offers search only when there is text to search", () => {
     expect(ydustServer([], { dir: "/x", api: "http://127.0.0.1:1", token: "t" }).tools).toEqual(["list_notes", "read_note", "write_note"]);
+  });
+});
+
+describe("runLines", () => {
+  it("ends a CLI at once when the answer was stopped before it started", async () => {
+    const stopped = new AbortController();
+    stopped.abort();
+    const started = Date.now();
+    const r = await runLines(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { signal: stopped.signal, label: "test" }, () => {});
+    expect(r.aborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 });

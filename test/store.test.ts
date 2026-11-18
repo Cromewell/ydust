@@ -71,28 +71,59 @@ describe("documents", () => {
         store.updateChat("doc", d.id, (m) => void m.messages.push(store.newMessage({ role: "user", content: `q${i}` }))),
       ),
     );
-    const meta = (await store.readMeta(d.id))!;
-    expect(meta.messages.map((m) => m.content).sort()).toEqual(Array.from({ length: 25 }, (_, i) => `q${i}`).sort());
+    const chat = (await store.readChat("doc", d.id))!;
+    expect(chat.messages.map((m) => m.content).sort()).toEqual(Array.from({ length: 25 }, (_, i) => `q${i}`).sort());
   });
 
   it("migrates the pre-multi-provider conversationId on read", async () => {
     const d = await store.createDoc("Legacy", pdf);
     const file = path.join(store.docDir(d.id), "meta.json");
     const raw = await readJsonFile(file);
-    delete raw.conversations;
     raw.conversationId = "conv-1";
     await writeFile(file, JSON.stringify(raw));
-    const meta = (await store.readMeta(d.id))!;
-    expect(meta.conversations).toEqual({ agy: "conv-1" });
-    expect(meta.conversationId).toBeUndefined();
+    expect((await store.readChat("doc", d.id))!.conversations).toEqual({ agy: "conv-1" });
+    expect(await store.readMeta(d.id)).not.toHaveProperty("conversationId");
+  });
+
+  it("keeps the chat in chat.json, so metadata writes don't rewrite it", async () => {
+    const d = await store.createDoc("Split", pdf);
+    await store.updateChat("doc", d.id, (m) => void m.messages.push(store.newMessage({ role: "user", content: "hi" })));
+    await store.updateMeta(d.id, (m) => void (m.lastPage = 3));
+    const meta = await readJsonFile(path.join(store.docDir(d.id), "meta.json"));
+    expect(meta).toMatchObject({ lastPage: 3, messageCount: 1 });
+    expect(meta).not.toHaveProperty("messages");
+    expect((await readJsonFile(path.join(store.docDir(d.id), "chat.json"))).messages).toHaveLength(1);
+  });
+
+  it("moves the chat of an old meta.json / folder.json into chat.json", async () => {
+    const d = await store.createDoc("Old", pdf);
+    const file = path.join(store.docDir(d.id), "meta.json");
+    const raw = await readJsonFile(file);
+    delete raw.messageCount;
+    Object.assign(raw, { messages: [store.newMessage({ role: "user", content: "old" })], conversations: { claude: "s1" }, sessionTags: { claude: "" } });
+    await writeFile(file, JSON.stringify(raw));
+    const f = await store.createFolder("OldFolder");
+    const ffile = path.join(store.folderDir(f.id), "folder.json");
+    await writeFile(ffile, JSON.stringify({ ...(await readJsonFile(ffile)), messages: [store.newMessage({ role: "user", content: "f" })], conversations: {} }));
+
+    expect((await store.readMeta(d.id))!.messageCount).toBe(1); // counted before the migration, too
+    expect((await store.readChat("doc", d.id))!.messages.map((m) => m.content)).toEqual(["old"]);
+    await store.migrateChats();
+    expect(await readJsonFile(file)).not.toHaveProperty("messages");
+    expect(await readJsonFile(ffile)).not.toHaveProperty("messages");
+    expect(await store.readChat("doc", d.id)).toMatchObject({ conversations: { claude: "s1" }, sessionTags: { claude: "" } });
+    expect((await store.readChat("folder", f.id))!.messages.map((m) => m.content)).toEqual(["f"]);
+    expect((await store.listFolders()).find((x) => x.id === f.id)!.messageCount).toBe(1);
   });
 
   it("summarize drops chat internals and counts messages", async () => {
-    const d = await store.updateMeta((await store.createDoc("Sum", pdf)).id, (m) => {
+    const id = (await store.createDoc("Sum", pdf)).id;
+    await store.updateChat("doc", id, (m) => {
       m.messages.push(store.newMessage({ role: "user", content: "hi" }));
       m.conversations = { claude: "s" };
       m.sessionTags = { claude: "" };
     });
+    const d = (await store.readMeta(id))!;
     const s = store.summarize(d, null);
     expect(s).toMatchObject({ id: d.id, name: "Sum", messageCount: 1, folderId: null });
     for (const k of ["messages", "conversations", "sessionTags", "contextSigs", "toolsVersion", "conversationId"]) expect(s).not.toHaveProperty(k);
@@ -224,8 +255,8 @@ describe("folders", () => {
     const id = randomUUID();
     await mkdir(store.folderDir(id), { recursive: true });
     await writeFile(path.join(store.folderDir(id), "folder.json"), JSON.stringify({ id, name: "Äpfel", createdAt: "", updatedAt: "" }));
-    const f = (await store.readFolder(id))!;
-    expect(f).toMatchObject({ docIds: [], messages: [], conversations: {} });
+    expect(await store.readFolder(id)).toMatchObject({ docIds: [] });
+    expect(await store.readChat("folder", id)).toMatchObject({ messages: [], conversations: {} });
     const names = (await store.listFolders()).map((x) => x.name);
     expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })));
     // "Äpfel" sorts like "apfel": after "A", before "B".

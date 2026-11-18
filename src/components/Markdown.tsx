@@ -17,15 +17,23 @@ const textOf = (node: ReactNode): string =>
         ? textOf((node.props as { children?: ReactNode }).children)
         : "";
 
+/** Fenced code blocks (``` or ~~~, to their closing fence or the end) and inline code spans. */
+const CODE = /^([ \t]*)(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[ \t]*(?=\n|$)|$(?![\s\S]))|(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?[^`]\3(?!`)/gm;
+
 /**
  * LaTeX delimiters \( \) and \[ \] → $ / $$ so remark-math understands them, and a line that
  * is just "$$…$$" → a display formula (remark-math would show it inline, unlike LaTeX).
+ * Code stays as it is: a regex like /\(\d+\)/ or LaTeX source shown as code is not math.
  */
 export function normalizeMath(src: string) {
-  return src
+  const code: string[] = [];
+  // Placeholders keep the lines intact, so "a line that is just $$…$$" still means the same.
+  const masked = src.replace(CODE, (m) => `\u0000${code.push(m) - 1}\u0000`);
+  return masked
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `$$${m}$$`)
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`)
-    .replace(/^([ \t]*)\$\$([^\n$][^\n]*?)\$\$[ \t]*$/gm, (_, indent: string, m: string) => `${indent}$$\n${indent}${m.trim()}\n${indent}$$`);
+    .replace(/^([ \t]*)\$\$([^\n$][^\n]*?)\$\$[ \t]*$/gm, (_, indent: string, m: string) => `${indent}$$\n${indent}${m.trim()}\n${indent}$$`)
+    .replace(/\u0000(\d+)\u0000/g, (_, i: string) => code[Number(i)]);
 }
 
 export const Markdown = memo(function Markdown({

@@ -31,5 +31,7 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 5173,
     proxy: { "/api": { target: "http://127.0.0.1:8787" } },
+    // Like the server in production: never inside another site's frame.
+    headers: { "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'", "X-Content-Type-Options": "nosniff" },
   },
 });

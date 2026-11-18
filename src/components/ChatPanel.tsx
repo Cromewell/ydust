@@ -33,7 +33,7 @@ import type { Anchor } from "./NotePicker";
 import { NotesPanel, type OpenNote } from "./NotesPanel";
 import { PROVIDER_ICON, ProviderSwitch } from "./ProviderSwitch";
 
-export type Streaming = { text: string; tools: ToolEvent[]; drafts: MessageDraft[] };
+export type Streaming = { text: string; tools: ToolEvent[]; drafts: MessageDraft[]; /** Stop was clicked: waiting for the server to end it. */ stopping?: boolean };
 
 /** An image waiting in the composer (a snip of the PDF or a pasted picture). */
 export type Attachment = { key: string; blob: Blob; url: string; label: string };
@@ -62,7 +62,8 @@ type Props = {
   effort: string;
   onEffort: (effort: string) => void;
   onClearQuote: () => void;
-  onSend: (question: string) => void;
+  /** `preset`: one of the app's built-in prompts (a starter, "Explain this image"), not typed. */
+  onSend: (question: string, preset?: boolean) => void;
   onStop: () => void;
   onReset: () => void;
   /** Open a page (of another document, if `doc` = its alias, else of the open PDF). */
@@ -222,11 +223,14 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
   }, [input]);
 
   const canSend = !!input.trim() || (attachments.length > 0 && !checkMode);
-  const submit = (text = input) => {
+  const submit = (text = input, preset = false) => {
     let q = text.trim();
-    if (!q && attachments.length && !checkMode) q = attachments.length > 1 ? "Explain what these images show." : "Explain what this image shows.";
+    if (!q && attachments.length && !checkMode) {
+      q = attachments.length > 1 ? "Explain what these images show." : "Explain what this image shows.";
+      preset = true;
+    }
     if (!q || streaming) return;
-    onSend(q);
+    onSend(q, preset);
     setInput("");
     stick.current = true;
   };
@@ -392,7 +396,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
                     {STARTERS[chat.kind].map((s) => (
                       <button
                         key={s}
-                        onClick={() => submit(s)}
+                        onClick={() => submit(s, true)}
                         className="rounded-lg border border-zinc-200 px-3 py-2 text-left text-xs text-zinc-600 transition hover:border-violet-300 hover:bg-violet-50/50 hover:text-zinc-900 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-violet-500/40 dark:hover:bg-violet-500/5 dark:hover:text-zinc-100"
                       >
                         {s}
@@ -757,6 +761,9 @@ function MessageView(
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
         <ProviderTag id={m.provider ?? "agy"} label={label(m.provider)} model={m.model} modelLabel={m.modelLabel} effort={m.effort} />
         {m.stopped && <span>Stopped</span>}
+        {m.newSession && (
+          <span title={`${label(m.provider) ?? "The assistant"}'s earlier session for this chat was gone, so this answer started a new one, with the chat so far as context.`}>New session</span>
+        )}
         <button
           onClick={() => onPin(m.id, !m.pinned)}
           className={clsx(
@@ -883,7 +890,7 @@ function StreamingView({
   drafts: React.ReactNode;
 }) {
   const active = s.tools.at(-1);
-  const status = active?.state === "active" ? toolLabel(active) : s.text ? null : "Thinking…";
+  const status = s.stopping ? "Stopping…" : active?.state === "active" ? toolLabel(active) : s.text ? null : "Thinking…";
   return (
     <div>
       {s.text && (
@@ -893,7 +900,7 @@ function StreamingView({
       )}
       {status && (
         <div className="mt-1 flex items-center gap-2 text-xs text-zinc-500">
-          {active?.state === "active" ? <FileSearch className="size-3.5 animate-pulse text-violet-500" /> : <Loader2 className="size-3.5 animate-spin" />}
+          {active?.state === "active" && !s.stopping ? <FileSearch className="size-3.5 animate-pulse text-violet-500" /> : <Loader2 className="size-3.5 animate-spin" />}
           <span className="shimmer">{status}</span>
         </div>
       )}

@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 // store.ts (imported by app.ts) reads YDUST_LIBRARY when it is imported.
 const lib = await mkdtemp(path.join(tmpdir(), "ydust-access-"));
 process.env.YDUST_LIBRARY = lib;
-const { app } = await import("../server/app.ts");
+const { app, runtime, AUTH_COOKIE } = await import("../server/app.ts");
 
 afterAll(() => rm(lib, { recursive: true, force: true }));
 
@@ -45,6 +45,29 @@ describe("access middleware", () => {
     }
   });
 
+  it("blocks pages of other local web servers (another port)", async () => {
+    for (const origin of ["http://127.0.0.1:3000", "http://localhost:8080", "http://127.0.0.1"]) {
+      const res = await get("/api/health", { host: LOCAL, origin, "sec-fetch-site": "same-site" });
+      expect(res.status, origin).toBe(403);
+    }
+  });
+
+  it("accepts only JSON or uploads as a body (plain text skips the browser's CORS check)", async () => {
+    const res = await app.request("/api/folders", { method: "POST", headers: { host: LOCAL, "content-type": "text/plain" }, body: JSON.stringify({ name: "x" }) });
+    expect(res.status).toBe(415);
+    const json = await app.request(`/api/docs/${randomUUID()}`, { method: "PATCH", headers: { host: LOCAL, "content-type": "application/json; charset=utf-8" }, body: "{}" });
+    expect(json.status).toBe(404); // got past the check
+    const empty = await app.request(`/api/docs/${randomUUID()}/stop`, { method: "POST", headers: { host: LOCAL } });
+    expect(empty.status).toBe(200);
+  });
+
+  it("can't be framed by another site", async () => {
+    const res = await get("/api/health", { host: LOCAL });
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
   it("blocks cross-site requests by sec-fetch-site", async () => {
     expect((await get("/api/health", { host: LOCAL, "sec-fetch-site": "cross-site" })).status).toBe(403);
     expect((await get("/api/health", { host: LOCAL, "sec-fetch-site": "none" })).status).toBe(200);
@@ -59,6 +82,30 @@ describe("access middleware", () => {
     expect(res.status).toBe(403);
     const list = await (await get("/api/folders", { host: LOCAL })).json();
     expect(list).toEqual([]);
+  });
+});
+
+describe("sign-in (YDUST_AUTH)", () => {
+  const token = "a".repeat(64);
+
+  it("needs the cookie the printed link sets", async () => {
+    runtime.authToken = token;
+    try {
+      expect((await get("/api/docs", { host: LOCAL })).status).toBe(401);
+      expect((await get(`/api/auth?token=${"b".repeat(64)}`, { host: LOCAL })).status).toBe(403);
+      const signIn = await get(`/api/auth?token=${token}`, { host: LOCAL });
+      expect(signIn.status).toBe(302);
+      const cookie = signIn.headers.get("set-cookie")!;
+      expect(cookie).toContain(`${AUTH_COOKIE}=${token}`);
+      expect(cookie).toMatch(/HttpOnly/i);
+      expect((await get("/api/docs", { host: LOCAL, cookie: `${AUTH_COOKIE}=${token}` })).status).toBe(200);
+      // ydust's MCP server proves itself with the turn token instead.
+      const internal = await app.request("/api/internal/drafts", { method: "POST", headers: { host: LOCAL, "content-type": "application/json" }, body: "{}" });
+      expect(internal.status).toBe(403);
+      expect(await internal.json()).toEqual({ error: "This conversation turn has ended." });
+    } finally {
+      runtime.authToken = null;
+    }
   });
 });
 

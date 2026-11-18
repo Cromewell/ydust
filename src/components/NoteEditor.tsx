@@ -1,7 +1,7 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { indentOnInput, syntaxHighlighting } from "@codemirror/language";
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, drawSelection, keymap, placeholder } from "@codemirror/view";
 import { classHighlighter } from "@lezer/highlight";
 import clsx from "clsx";
@@ -163,6 +163,9 @@ export default function NoteEditor({
   // The editor itself, once per note.
   useEffect(() => {
     let previewTimer: ReturnType<typeof setTimeout> | null = null;
+    // Read-only until the note has loaded: text typed or inserted before would be saved over it.
+    const editable = new Compartment();
+    const locked = [EditorView.editable.of(false), EditorState.readOnly.of(true)];
     const ed = new EditorView({
       parent: host.current!,
       state: EditorState.create({
@@ -183,6 +186,7 @@ export default function NoteEditor({
             indentWithTab,
           ]),
           theme,
+          editable.of(locked),
           EditorView.updateListener.of((u) => {
             if (!u.docChanged) return;
             setStatus("unsaved");
@@ -197,17 +201,6 @@ export default function NoteEditor({
     view.current = ed;
     setStatus("loading");
     let cancelled = false;
-    api.getNote(owner, name).then(
-      (n) => {
-        if (cancelled) return;
-        // Typed before it loaded? Rare, but don't lose it: the load wins only if nothing was typed.
-        if (ed.state.doc.length === 0) load(n.content, n.version);
-        else version.current = n.version;
-        ed.focus();
-      },
-      (err) => !cancelled && (setError((err as Error).message), setStatus("error")),
-    );
-
     const editor: OpenEditor = {
       owner,
       name,
@@ -218,7 +211,17 @@ export default function NoteEditor({
         ed.focus();
       },
     };
-    noteEditor.set(editor);
+    api.getNote(owner, name).then(
+      (n) => {
+        if (cancelled) return;
+        load(n.content, n.version);
+        ed.dispatch({ effects: editable.reconfigure([]) });
+        // Only now can "Add to note" write into this editor (before, it goes to the file).
+        noteEditor.set(editor);
+        ed.focus();
+      },
+      (err) => !cancelled && (setError((err as Error).message), setStatus("error")),
+    );
 
     return () => {
       cancelled = true;

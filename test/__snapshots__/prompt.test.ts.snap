@@ -1,7 +1,7 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`buildPrompt > challenge on selected lines of a folder's note 1`] = `
-"Answer language: the language of my question.
+"Answer language: the language my note is written in.
 
 My note "course.md" (lines 2–3, the part I selected), with line numbers:
 <note name="course.md">

@@ -1,20 +1,22 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { Hono, type Context, type Next } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
-import { PROVIDERS, isProviderId } from "./providers/index.ts";
+import { PROVIDERS, isProviderId, type Provider, type ProviderId } from "./providers/index.ts";
 import { HighlightError, addHighlight, deleteHighlight, highlightsPath, listHighlights, patchHighlight } from "./highlights.ts";
 import { acceptDraft, clearDrafts, createDraft, discardDraft, getDraft, listDrafts, type DraftInfo } from "./drafts.ts";
-import { ydustServer } from "./mcp/launch.ts";
+import { ydustServer, type McpServer, type McpTool } from "./mcp/launch.ts";
 import { MAX_NOTE_BYTES, NoteError, deleteNote, listNotes, notesDir, readNote, renameNote, saveNote } from "./notes.ts";
 import { buildPrompt, scopeSignature, type DocRef, type Scope } from "./prompt.ts";
 import {
   ASK_MODES,
   IMAGE_TYPES,
   LIBRARY_DIR,
+  NotFoundError,
   chatDir,
   chatExists,
   clearImages,
@@ -61,11 +63,17 @@ const MAX_UPLOAD = 200 * 1024 * 1024;
 const MAX_IMAGE = 20 * 1024 * 1024;
 const MAX_IMAGES_PER_QUESTION = 10;
 const MAX_OUTLINE = 200_000;
+const MAX_TEXT_BODY = 64 * 1024 * 1024;
+const MAX_QUOTE_CHARS = 20_000;
 /** Bump when ydust's tools change, so resumed sessions are told about them. */
 const TOOLS_VERSION = 3;
 
-/** Where ydust's MCP server reaches this server (set by index.ts once it listens; tests set it too). */
-export const runtime = { apiBase: "", approvalTimeoutMs: 5 * 60_000 };
+/**
+ * Where ydust's MCP server reaches this server (set by index.ts once it listens; tests set it
+ * too), and the sign-in token when YDUST_AUTH is on (null: no sign-in).
+ */
+export const runtime: { apiBase: string; approvalTimeoutMs: number; authToken: string | null } = { apiBase: "", approvalTimeoutMs: 5 * 60_000, authToken: null };
+export const AUTH_COOKIE = "ydust_auth";
 
 /** All API routes. server/index.ts serves it (tests call `app.request` without a port). */
 export const app = new Hono();
@@ -76,13 +84,15 @@ const running = new Map<string, { controller: AbortController; done: Promise<voi
 type Turn = {
   kind: ChatKind;
   id: string;
-  provider: string;
+  provider: ProviderId;
   /** "Request changes": the draft this turn revises. */
   revises: { id: string; target: string } | null;
   /** Drafts proposed so far, and the latest one per note (a second write in a turn revises the first). */
   drafts: DraftInfo[];
   latest: Map<string, string>;
   emit: (event: string, data: unknown) => void;
+  /** May propose drafts (not in a review or challenge, which only read). */
+  write: boolean;
   /** Web search is on for this turn; the queries the user allowed; requests waiting for a click. */
   web: boolean;
   webQueries: string[];
@@ -113,25 +123,78 @@ const chatKey = (kind: ChatKind, id: string) => `${kind}:${id}`;
 // Only this app may talk to the API: block DNS rebinding (foreign Host header) and
 // cross-site requests from other web pages (foreign Origin), which could otherwise
 // upload files or drive the agent through your browser.
-const LOCAL_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+const LOCAL_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(?::(\d+))?$/i;
+/** The ports this app is served on: the server's, and the dev web server's (whose proxy keeps Host). */
+function appPorts() {
+  const ports = new Set([process.env.PORT || "8787", process.env.YDUST_DEV_PORT || "5173"]);
+  const own = runtime.apiBase.match(/:(\d+)$/)?.[1];
+  if (own) ports.add(own);
+  return ports;
+}
+/** A local host name (Host header: DNS rebinding sends a foreign name, whatever the port). */
+const isLocalHost = (host: string) => LOCAL_HOST.test(host);
+/** A page of this app: a local host name and one of its ports, not another local web server. */
+function isAppOrigin(origin: string) {
+  const u = new URL(origin);
+  const m = LOCAL_HOST.exec(u.host);
+  return !!m && appPorts().has(u.port || (u.protocol === "https:" ? "443" : "80"));
+}
+
+// Never inside another site's frame (a page could trick you into clicking Allow or Delete),
+// and no content sniffing.
+app.use("*", async (c, next) => {
+  await next();
+  c.header("X-Frame-Options", "DENY");
+  c.header("Content-Security-Policy", "frame-ancestors 'none'");
+  c.header("X-Content-Type-Options", "nosniff");
+});
+
 app.use("/api/*", async (c, next) => {
   const host = c.req.header("host") ?? "";
   const origin = c.req.header("origin");
   let originOk = true;
   if (origin) {
     try {
-      originOk = LOCAL_HOST.test(new URL(origin).host);
+      originOk = isAppOrigin(origin);
     } catch {
       originOk = false;
     }
   }
-  if (!LOCAL_HOST.test(host) || !originOk || c.req.header("sec-fetch-site") === "cross-site") {
+  if (!isLocalHost(host) || !originOk || c.req.header("sec-fetch-site") === "cross-site") {
     return c.json({ error: "forbidden" }, 403);
+  }
+  // A body must be JSON or a form upload. Other pages could send text/plain without asking the
+  // browser first (no CORS preflight); JSON can't be sent cross-origin that way.
+  const length = c.req.header("content-length");
+  const hasBody = length !== undefined ? length !== "0" : !!c.req.header("transfer-encoding") || c.req.raw.body !== null;
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method) && hasBody) {
+    const type = (c.req.header("content-type") ?? "").toLowerCase();
+    if (!type.startsWith("application/json") && !type.startsWith("multipart/form-data")) return c.json({ error: "unsupported content type" }, 415);
+  }
+  await next();
+});
+
+/** Same token? (Constant time, so it can't be guessed character by character.) */
+const sameToken = (a: string | undefined, b: string) => !!a && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+// Optional sign-in (YDUST_AUTH=1, for shared computers): the link the server prints sets a cookie.
+// ydust's MCP server uses its turn token instead (internal routes).
+app.get("/api/auth", (c) => {
+  if (!runtime.authToken) return c.redirect("/");
+  if (!sameToken(c.req.query("token"), runtime.authToken)) return c.json({ error: "That sign-in link is not valid (any more). Use the one ydust printed when it started." }, 403);
+  setCookie(c, AUTH_COOKIE, runtime.authToken, { httpOnly: true, sameSite: "Strict", path: "/", maxAge: 400 * 24 * 3600 });
+  return c.redirect("/");
+});
+app.use("/api/*", async (c, next) => {
+  if (!runtime.authToken || c.req.path.startsWith("/api/internal/")) return next();
+  if (!sameToken(getCookie(c, AUTH_COOKIE), runtime.authToken)) {
+    return c.json({ error: "Not signed in: open the sign-in link that ydust printed in its terminal when it started." }, 401);
   }
   await next();
 });
 
 app.onError((err, c) => {
+  if (err instanceof NotFoundError) return c.json({ error: "not found" }, 404);
   console.error(err);
   return c.json({ error: err.message }, 500);
 });
@@ -170,6 +233,7 @@ app.post("/api/internal/drafts", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
   const turn = typeof body.token === "string" && body.token.length === 64 ? turns.get(body.token) : undefined;
   if (!turn) return c.json({ error: "This conversation turn has ended." }, 403);
+  if (!turn.write) return c.json({ error: "This answer only reads: it can't propose changes to notes." }, 403);
   const target = typeof body.target === "string" ? body.target : "";
   const replaces = turn.latest.get(target) ?? (turn.revises?.target === target ? turn.revises.id : null);
   try {
@@ -222,7 +286,10 @@ app.post("/api/internal/approvals", async (c) => {
 
 app.get("/api/docs", async (c) => c.json(await listDocs()));
 
-app.post("/api/docs", async (c) => {
+/** Refuse a body that is too large before reading it into memory. */
+const limit = (maxSize: number, message: string) => bodyLimit({ maxSize, onError: (c) => c.json({ error: message }, 413) });
+
+app.post("/api/docs", limit(MAX_UPLOAD + 1024 * 1024, "file is larger than 200 MB"), async (c) => {
   const body = await c.req.parseBody();
   const file = body.file;
   if (!(file instanceof File)) return c.json({ error: "no file uploaded" }, 400);
@@ -241,9 +308,9 @@ app.post("/api/docs", async (c) => {
 
 app.get("/api/docs/:id", async (c) => {
   const id = c.req.param("id");
-  const meta = await readMeta(id);
-  if (!meta) return c.json({ error: "not found" }, 404);
-  return c.json({ ...meta, folderId: (await folderOfDoc(id))?.id ?? null, busy: running.has(chatKey("doc", id)) });
+  const [meta, chat] = await Promise.all([readMeta(id), readChat("doc", id)]);
+  if (!meta || !chat) return c.json({ error: "not found" }, 404);
+  return c.json({ ...meta, messages: chat.messages, folderId: (await folderOfDoc(id))?.id ?? null, busy: running.has(chatKey("doc", id)) });
 });
 
 app.get("/api/docs/:id/file", async (c) => {
@@ -272,7 +339,7 @@ app.patch("/api/docs/:id", async (c) => {
   return c.json(summarize(meta, (await folderOfDoc(id))?.id ?? null));
 });
 
-app.put("/api/docs/:id/text", async (c) => {
+app.put("/api/docs/:id/text", limit(MAX_TEXT_BODY, "the extracted text is too large"), async (c) => {
   const id = c.req.param("id");
   const { pages, version, outline } = await c.req.json<{ pages: string[]; version?: number; outline?: string }>();
   if (!Array.isArray(pages) || pages.some((p) => typeof p !== "string")) {
@@ -343,9 +410,9 @@ app.post("/api/folders", async (c) => {
 });
 
 app.get("/api/folders/:id", async (c) => {
-  const f = await readFolder(c.req.param("id"));
-  if (!f) return c.json({ error: "not found" }, 404);
-  return c.json({ ...f, busy: running.has(chatKey("folder", f.id)) });
+  const [f, chat] = await Promise.all([readFolder(c.req.param("id")), readChat("folder", c.req.param("id"))]);
+  if (!f || !chat) return c.json({ error: "not found" }, 404);
+  return c.json({ ...f, messages: chat.messages, busy: running.has(chatKey("folder", f.id)) });
 });
 
 app.patch("/api/folders/:id", async (c) => {
@@ -522,7 +589,7 @@ function chatRoutes(kind: ChatKind, base: string) {
     }),
   );
 
-  app.post(`${base}/:id/images`, async (c) => {
+  app.post(`${base}/:id/images`, limit(MAX_IMAGE + 1024 * 1024, "image is larger than 20 MB"), async (c) => {
     const id = c.req.param("id");
     if (!(await readChat(kind, id))) return c.json({ error: "not found" }, 404);
     const file = (await c.req.parseBody()).file;
@@ -549,37 +616,13 @@ function chatRoutes(kind: ChatKind, base: string) {
   });
 
   app.post(`${base}/:id/ask`, async (c) => {
-    const id = c.req.param("id");
+    const id = c.req.param("id")!;
     const key = chatKey(kind, id);
-    const dir = chatDir(kind, id);
-    const body = await c.req.json<{
-      question?: string;
-      quote?: Quote;
-      model?: string;
-      effort?: string;
-      images?: string[];
-      language?: string;
-      provider?: string;
-      level?: string;
-      mode?: string;
-      /** Id of an assistant message: ask the same question again (to another assistant). */
-      secondOpinionOf?: string;
-      /** "Request changes" to this draft: the question is the user's feedback. */
-      draftId?: string;
-      /** review-note / challenge-note: one of this chat's notes, optionally just some lines. */
-      note?: { name?: unknown; lines?: unknown };
-      /** Web search for this question (approved query by query). */
-      web?: boolean;
-    }>();
-    const { model, effort, language, level, secondOpinionOf, provider: providerId = "agy" } = body;
-    let { question, quote, images } = body;
-    let mode = ASK_MODES.includes(body.mode as AskMode) ? (body.mode as AskMode) : undefined;
-    let noteRef: NoteRef | undefined =
-      body.note && typeof body.note.name === "string"
-        ? { name: body.note.name, lines: body.note.lines as [number, number] | undefined, instructions: typeof question === "string" ? question.trim() || undefined : undefined }
-        : undefined;
+    const body = await c.req.json<AskBody>().catch(() => null);
+    if (!body || typeof body !== "object") return c.json({ error: "invalid request" }, 400);
+    const providerId = body.provider ?? "agy";
     if (!isProviderId(providerId)) return c.json({ error: "unknown assistant" }, 400);
-    const provider = PROVIDERS[providerId];
+
     const previous = running.get(key);
     if (previous) {
       // A just-stopped turn may still be shutting down; give it a moment.
@@ -589,251 +632,355 @@ function chatRoutes(kind: ChatKind, base: string) {
       await Promise.race([previous.done, new Promise((r) => setTimeout(r, 5000))]);
       if (running.has(key)) return c.json({ error: "The previous question is still stopping, try again." }, 409);
     }
-    const chat = await readChat(kind, id);
-    const loaded = chat && (await loadScope(kind, id));
-    if (!chat || !loaded) return c.json({ error: "not found" }, 404);
-    const { scope, docs, readDirs } = loaded;
-
-    // Request changes to a draft: its text goes into the prompt, the next write_note revises it.
-    let revision: { id: string; target: string; mode: string; revision: number; content: string } | undefined;
-    if (typeof body.draftId === "string") {
-      const d = await getDraft(kind, id, body.draftId).catch(() => null);
-      if (!d) return c.json({ error: "That draft no longer exists." }, 404);
-      if (d.status !== "open") return c.json({ error: "A newer version of that draft exists." }, 409);
-      revision = { id: d.id, target: d.target, mode: d.mode, revision: d.revision, content: d.content };
-    }
-
-    // Second opinion: repeat the question that led to that answer, and show the answer.
-    let otherAnswer: { by: string; content: string } | undefined;
-    const shownAlready = new Set<string>(); // not repeated in the handed-over history
-    if (typeof secondOpinionOf === "string") {
-      const i = chat.messages.findIndex((m) => m.id === secondOpinionOf && m.role === "assistant");
-      const asked = i > 0 ? chat.messages.slice(0, i).reverse().find((m) => m.role === "user") : undefined;
-      if (!asked) return c.json({ error: "answer not found" }, 404);
-      question = asked.content;
-      quote = asked.quote;
-      images = asked.images;
-      mode = asked.mode;
-      noteRef = asked.noteRef;
-      body.web = asked.web && !!provider.webSearch; // a second opinion from a CLI without web search answers without it
-      const prev = chat.messages[i];
-      shownAlready.add(prev.id).add(asked.id);
-      otherAnswer = { by: prev.provider && isProviderId(prev.provider) ? PROVIDERS[prev.provider].label : "another assistant", content: prev.content };
-    }
-
-    // A quote is from this chat's document, or (folder chat) from one of the folder's documents.
-    let cleanQuote: Quote | undefined;
-    if (quote && typeof quote.text === "string" && quote.text.trim() && Number.isInteger(quote.page) && quote.page >= 1) {
-      const from = kind === "doc" ? id : quote.doc;
-      if (typeof from !== "string" || !docs.some((d) => d.id === from)) return c.json({ error: "that passage is not from a document of this chat" }, 400);
-      cleanQuote = { text: quote.text.trim(), page: quote.page, doc: kind === "folder" ? from : undefined };
-    }
-    const quoteDocId = cleanQuote ? (cleanQuote.doc ?? id) : null;
-
-    // Review or challenge a note: ydust reads it (as it is now), the assistant gets it with line numbers.
-    let note: { name: string; content: string; lines?: [number, number] } | undefined;
-    if (mode === "review-note" || mode === "challenge-note" || mode === "fix-note") {
-      if (!noteRef || noteNameProblem(noteRef.name)) return c.json({ error: "Which note? (`note.name`)" }, 400);
-      const n = await readNote(kind, id, noteRef.name).catch(() => null);
-      if (!n) return c.json({ error: `There is no note named “${noteRef.name}” in this chat.` }, 404);
-      const total = n.content.split("\n").length;
-      const l = noteRef.lines;
-      const lines = Array.isArray(l) && l.length === 2 && l.every((x) => Number.isInteger(x)) && l[0] >= 1 && l[1] >= l[0] && l[0] <= total ? ([l[0], Math.min(l[1], total)] as [number, number]) : undefined;
-      noteRef = { name: n.name, lines, instructions: noteRef.instructions?.slice(0, 4000) };
-      note = { name: n.name, content: n.content, lines };
-      const what = lines ? `${lines[0] === lines[1] ? `line ${lines[0]}` : `lines ${lines[0]}–${lines[1]}`} of my note “${n.name}”` : `my note “${n.name}”`;
-      const ask = mode === "review-note" ? `Review ${what}.` : mode === "challenge-note" ? `Challenge me on ${what}.` : `Propose fixes for ${what}.`;
-      question = `${ask}${noteRef.instructions ? `\n\n${noteRef.instructions}` : ""}`;
-    } else {
-      noteRef = undefined;
-    }
-
-    if (typeof question !== "string" || !question.trim()) return c.json({ error: "question is empty" }, 400);
-    const imageIds = Array.isArray(images) ? [...new Set(images)] : [];
-    if (imageIds.length > MAX_IMAGES_PER_QUESTION) return c.json({ error: `at most ${MAX_IMAGES_PER_QUESTION} images per question` }, 400);
-    for (const img of imageIds) {
-      if (typeof img !== "string" || !isValidImageId(img) || !(await stat(imagePath(dir, img)).catch(() => null))) {
-        return c.json({ error: "unknown image" }, 400);
-      }
-    }
-
-    // Resume the CLI's session, unless it was started with another setup (Provider.sessionTag).
-    const tag = provider.sessionTag ?? "";
-    const sessionId = chat.conversations[providerId] && (chat.sessionTags?.[providerId] ?? "") === tag ? chat.conversations[providerId] : null;
-    const signature = scopeSignature(scope);
-    // Sessions from before folders existed were told about this document only.
-    const told = chat.contextSigs?.[providerId] ?? (scope.kind === "doc" ? scopeSignature({ ...scope, folder: null }) : "");
-    // ydust's search/read_pages tools over the chat's documents (that have text); the first is the default.
-    const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile, highlightsFile: highlightsPath(d.id) }));
-    // …and the chat's notes; drafts come back here with this turn's token.
-    // A review or challenge only reads: no write_note in that turn (fixes are asked for separately).
-    // Web search only where the CLI can ask for each query (and only if ydust can be reached).
-    const token = randomBytes(32).toString("hex");
-    const readOnly = mode === "review-note" || mode === "challenge-note";
-    const web = body.web === true && !!provider.webSearch && !!runtime.apiBase;
-    if (body.web === true && !provider.webSearch) return c.json({ error: provider.webSearchNote ?? `${provider.label} can't search the web here.` }, 400);
-    const { server: mcp, tools: mcpTools } = ydustServer(
-      searchable,
-      { dir: notesDir(kind, id), api: runtime.apiBase || undefined, token, write: !readOnly },
-      { web },
-    );
-
+    // Take the chat now, with no await between the check above and this: a second question
+    // (another tab, a double click) gets 409 instead of a second CLI on the same session.
     const controller = new AbortController();
     let finish!: () => void;
-    running.set(key, { controller, done: new Promise<void>((r) => (finish = r)) });
-    const turn: Turn = {
-      kind,
-      id,
-      provider: providerId,
-      revises: revision ? { id: revision.id, target: revision.target } : null,
-      drafts: [],
-      latest: new Map(),
-      emit: () => {},
-      web,
-      webQueries: [],
-      approvals: new Map(),
-      asked: 0,
-      signal: controller.signal,
-    };
-    turns.set(token, turn);
+    const entry = { controller, done: new Promise<void>((r) => (finish = r)) };
+    running.set(key, entry);
+    let token: string | null = null;
     const release = () => {
-      turns.delete(token);
-      running.delete(key);
+      if (token) turns.delete(token);
+      if (running.get(key) === entry) running.delete(key);
       finish();
     };
 
-    let userMsg: Message, prompt: string;
+    let prepared: PreparedTurn | Response;
     try {
-      userMsg = newMessage({
-        role: "user",
-        content: question.trim(),
-        quote: cleanQuote,
-        images: imageIds.length ? imageIds : undefined,
-        mode,
-        secondOpinionOf: otherAnswer ? secondOpinionOf : undefined,
-        draftRef: revision ? { id: revision.id, target: revision.target, revision: revision.revision } : undefined,
-        noteRef,
-        web: web || undefined,
-      });
-      await updateChat(kind, id, (m) => void m.messages.push(userMsg));
-      // Everything since this assistant's last answer (all of it, if it has no session here).
-      // Answers from before multi-provider support carry no provider: they were agy's.
-      const answeredBy = (m: Message) => (m.role === "assistant" ? (m.provider ?? "agy") : null);
-      const lastOwn = chat.messages.map(answeredBy).lastIndexOf(providerId);
-      const unseen = sessionId ? chat.messages.slice(lastOwn + 1) : chat.messages;
-      prompt = buildPrompt({
-        scope,
-        question: question.trim(),
-        quote: cleanQuote,
-        quoteDoc: quoteDocId ? docs.find((d) => d.id === quoteDocId) : null,
-        pageText: cleanQuote && quoteDocId ? await readPageText(quoteDocId, cleanQuote.page) : null,
-        images: imageIds.map((img) => imagePath(dir, img)),
-        language: typeof language === "string" ? language : undefined,
-        firstTurn: !sessionId,
-        contextChanged: !!sessionId && told !== signature,
-        tools: searchable.length > 0,
-        // The rules stay the same from turn to turn, even when one turn can't write.
-        noteTools: runtime.apiBase ? "write" : "read",
-        toolsIntro: !!sessionId && (chat.toolsVersion?.[providerId] ?? 0) < TOOLS_VERSION,
-        revision,
-        note: note && noteRef ? { ...note, instructions: noteRef.instructions } : undefined,
-        web,
-        // What the other assistant discussed meanwhile is handed over as context
-        // (everything, if this assistant starts a new session).
-        history: unseen.filter((m) => (sessionId ? answeredBy(m) !== providerId : true) && !shownAlready.has(m.id)),
-        docNames: new Map(docs.map((d) => [d.id, d.name])),
-        level: typeof level === "string" ? level : undefined,
-        mode,
-        otherAnswer,
-      });
+      prepared = await prepareTurn(c, kind, id, body, providerId, controller);
     } catch (err) {
       release();
       throw err;
     }
+    if (prepared instanceof Response) {
+      release();
+      return prepared;
+    }
+    token = prepared.token;
+    return streamTurn(c, kind, id, prepared, release);
+  });
+}
 
-    return streamSSE(c, async (stream) => {
-      stream.onAbort(() => controller.abort());
-      // Chain writes so deltas always reach the client in order.
-      let chain = Promise.resolve();
-      const send = (event: string, data: unknown) =>
-        (chain = chain.then(() => stream.writeSSE({ event, data: JSON.stringify(data) })).catch(() => {}));
-      turn.emit = (event, data) => void send(event, data);
+type AskBody = {
+  question?: string;
+  quote?: Quote;
+  model?: string;
+  effort?: string;
+  images?: string[];
+  language?: string;
+  provider?: string;
+  level?: string;
+  mode?: string;
+  /** Id of an assistant message: ask the same question again (to another assistant). */
+  secondOpinionOf?: string;
+  /** "Request changes" to this draft: the question is the user's feedback. */
+  draftId?: string;
+  /** review-note / challenge-note: one of this chat's notes, optionally just some lines. */
+  note?: { name?: unknown; lines?: unknown };
+  /** Web search for this question (approved query by query). */
+  web?: boolean;
+  /** The question is one of the app's built-in English prompts (Explain, a starter, …), not typed. */
+  preset?: boolean;
+};
 
-      let assistant;
-      try {
-        void send("user", userMsg);
-        const cleanModel = typeof model === "string" && /^[\w.-]+$/.test(model) ? model : null;
-        const cleanEffort = typeof effort === "string" && provider.efforts.includes(effort) ? effort : null;
-        const result = await provider.run({
-          effort: cleanEffort,
+/** Everything a turn needs once its question is checked and saved. */
+type PreparedTurn = {
+  token: string;
+  turn: Turn;
+  controller: AbortController;
+  provider: Provider;
+  providerId: ProviderId;
+  userMsg: Message;
+  /** The prompt for the CLI's session, and the one for a new session (if that session is gone). */
+  prompt: string;
+  freshPrompt: string;
+  dir: string;
+  readDirs: string[];
+  mcp: McpServer;
+  mcpTools: McpTool[];
+  web: boolean;
+  sessionId: string | null;
+  tag: string;
+  signature: string;
+  model: string | null;
+  effort: string | null;
+};
+
+/**
+ * Check a question and save it; a Response if it is refused. Runs while the chat is taken
+ * (see the ask route), so it may take its time.
+ */
+async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody, providerId: ProviderId, controller: AbortController): Promise<PreparedTurn | Response> {
+  const provider = PROVIDERS[providerId];
+  const dir = chatDir(kind, id);
+  const { model, effort, language, level, secondOpinionOf } = body;
+  let { question, quote, images } = body;
+  let preset = body.preset === true;
+  let mode = ASK_MODES.includes(body.mode as AskMode) ? (body.mode as AskMode) : undefined;
+  let noteRef: NoteRef | undefined =
+    body.note && typeof body.note.name === "string"
+      ? { name: body.note.name, lines: body.note.lines as [number, number] | undefined, instructions: typeof question === "string" ? question.trim() || undefined : undefined }
+      : undefined;
+
+  const chat = await readChat(kind, id);
+  const loaded = chat && (await loadScope(kind, id));
+  if (!chat || !loaded) return c.json({ error: "not found" }, 404);
+  const { scope, docs, readDirs } = loaded;
+
+  // Request changes to a draft: its text goes into the prompt, the next write_note revises it.
+  let revision: { id: string; target: string; mode: string; revision: number; content: string } | undefined;
+  if (typeof body.draftId === "string") {
+    const d = await getDraft(kind, id, body.draftId).catch(() => null);
+    if (!d) return c.json({ error: "That draft no longer exists." }, 404);
+    if (d.status !== "open") return c.json({ error: "A newer version of that draft exists." }, 409);
+    revision = { id: d.id, target: d.target, mode: d.mode, revision: d.revision, content: d.content };
+  }
+
+  // Second opinion: repeat the question that led to that answer, and show the answer.
+  let otherAnswer: { by: string; content: string } | undefined;
+  let web = body.web === true;
+  const shownAlready = new Set<string>(); // not repeated in the handed-over history
+  if (typeof secondOpinionOf === "string") {
+    const i = chat.messages.findIndex((m) => m.id === secondOpinionOf && m.role === "assistant");
+    const asked = i > 0 ? chat.messages.slice(0, i).reverse().find((m) => m.role === "user") : undefined;
+    if (!asked) return c.json({ error: "answer not found" }, 404);
+    question = asked.content;
+    quote = asked.quote;
+    images = asked.images;
+    mode = asked.mode;
+    noteRef = asked.noteRef;
+    preset = !!asked.preset;
+    web = !!asked.web && !!provider.webSearch; // a second opinion from a CLI without web search answers without it
+    const prev = chat.messages[i];
+    shownAlready.add(prev.id).add(asked.id);
+    otherAnswer = { by: prev.provider && isProviderId(prev.provider) ? PROVIDERS[prev.provider].label : "another assistant", content: prev.content };
+  }
+
+  // A quote is from this chat's document, or (folder chat) from one of the folder's documents.
+  let cleanQuote: Quote | undefined;
+  if (quote && typeof quote.text === "string" && quote.text.trim() && Number.isInteger(quote.page) && quote.page >= 1) {
+    const from = kind === "doc" ? id : quote.doc;
+    if (typeof from !== "string" || !docs.some((d) => d.id === from)) return c.json({ error: "that passage is not from a document of this chat" }, 400);
+    cleanQuote = { text: quote.text.trim().slice(0, MAX_QUOTE_CHARS), page: quote.page, doc: kind === "folder" ? from : undefined };
+  }
+  const quoteDocId = cleanQuote ? (cleanQuote.doc ?? id) : null;
+
+  // Review or challenge a note: ydust reads it (as it is now), the assistant gets it with line numbers.
+  let note: { name: string; content: string; lines?: [number, number] } | undefined;
+  if (mode === "review-note" || mode === "challenge-note" || mode === "fix-note") {
+    if (!noteRef || noteNameProblem(noteRef.name)) return c.json({ error: "Which note? (`note.name`)" }, 400);
+    const n = await readNote(kind, id, noteRef.name).catch(() => null);
+    if (!n) return c.json({ error: `There is no note named “${noteRef.name}” in this chat.` }, 404);
+    const total = n.content.split("\n").length;
+    const l = noteRef.lines;
+    const lines = Array.isArray(l) && l.length === 2 && l.every((x) => Number.isInteger(x)) && l[0] >= 1 && l[1] >= l[0] && l[0] <= total ? ([l[0], Math.min(l[1], total)] as [number, number]) : undefined;
+    noteRef = { name: n.name, lines, instructions: noteRef.instructions?.slice(0, 4000) };
+    note = { name: n.name, content: n.content, lines };
+    const what = lines ? `${lines[0] === lines[1] ? `line ${lines[0]}` : `lines ${lines[0]}–${lines[1]}`} of my note “${n.name}”` : `my note “${n.name}”`;
+    const ask = mode === "review-note" ? `Review ${what}.` : mode === "challenge-note" ? `Challenge me on ${what}.` : `Propose fixes for ${what}.`;
+    question = `${ask}${noteRef.instructions ? `\n\n${noteRef.instructions}` : ""}`;
+  } else {
+    noteRef = undefined;
+  }
+
+  if (typeof question !== "string" || !question.trim()) return c.json({ error: "question is empty" }, 400);
+  const imageIds = Array.isArray(images) ? [...new Set(images)] : [];
+  if (imageIds.length > MAX_IMAGES_PER_QUESTION) return c.json({ error: `at most ${MAX_IMAGES_PER_QUESTION} images per question` }, 400);
+  for (const img of imageIds) {
+    if (typeof img !== "string" || !isValidImageId(img) || !(await stat(imagePath(dir, img)).catch(() => null))) {
+      return c.json({ error: "unknown image" }, 400);
+    }
+  }
+  if (web && !provider.webSearch) return c.json({ error: provider.webSearchNote ?? `${provider.label} can't search the web here.` }, 400);
+  web = web && !!runtime.apiBase; // the approve tool must reach ydust
+
+  // Resume the CLI's session, unless it was started with another setup (Provider.sessionTag).
+  const tag = provider.sessionTag ?? "";
+  const sessionId = chat.conversations[providerId] && (chat.sessionTags?.[providerId] ?? "") === tag ? chat.conversations[providerId] : null;
+  const signature = scopeSignature(scope);
+  // Sessions from before folders existed were told about this document only.
+  const told = chat.contextSigs?.[providerId] ?? (scope.kind === "doc" ? scopeSignature({ ...scope, folder: null }) : "");
+  // ydust's search/read_pages tools over the chat's documents (that have text); the first is the default.
+  const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile, highlightsFile: highlightsPath(d.id) }));
+  // …and the chat's notes; drafts come back here with this turn's token.
+  // A review or challenge only reads: no write_note in that turn (fixes are asked for separately).
+  const token = randomBytes(32).toString("hex");
+  const readOnly = mode === "review-note" || mode === "challenge-note";
+  const { server: mcp, tools: mcpTools } = ydustServer(searchable, { dir: notesDir(kind, id), api: runtime.apiBase || undefined, token, write: !readOnly }, { web });
+
+  const userMsg = newMessage({
+    role: "user",
+    content: question.trim(),
+    quote: cleanQuote,
+    images: imageIds.length ? imageIds : undefined,
+    mode,
+    secondOpinionOf: otherAnswer ? secondOpinionOf : undefined,
+    draftRef: revision ? { id: revision.id, target: revision.target, revision: revision.revision } : undefined,
+    noteRef,
+    web: web || undefined,
+    preset: preset || undefined,
+  });
+  await updateChat(kind, id, (m) => void m.messages.push(userMsg));
+
+  // Everything since this assistant's last answer (all of it, if it has no session here).
+  // Answers from before multi-provider support carry no provider: they were agy's.
+  const answeredBy = (m: Message) => (m.role === "assistant" ? (m.provider ?? "agy") : null);
+  const lastOwn = chat.messages.map(answeredBy).lastIndexOf(providerId);
+  const promptFor = async (resumed: boolean) =>
+    buildPrompt({
+      scope,
+      question: question!.trim(),
+      quote: cleanQuote,
+      quoteDoc: quoteDocId ? docs.find((d) => d.id === quoteDocId) : null,
+      pageText: cleanQuote && quoteDocId ? await readPageText(quoteDocId, cleanQuote.page) : null,
+      images: imageIds.map((img) => imagePath(dir, img)),
+      language: typeof language === "string" ? language : undefined,
+      firstTurn: !resumed,
+      contextChanged: resumed && told !== signature,
+      tools: searchable.length > 0,
+      // The rules stay the same from turn to turn, even when one turn can't write.
+      noteTools: runtime.apiBase ? "write" : "read",
+      toolsIntro: resumed && (chat.toolsVersion?.[providerId] ?? 0) < TOOLS_VERSION,
+      revision,
+      note: note && noteRef ? { ...note, instructions: noteRef.instructions } : undefined,
+      web,
+      // What the other assistant discussed meanwhile is handed over as context
+      // (everything, if this assistant starts a new session).
+      history: (resumed ? chat.messages.slice(lastOwn + 1) : chat.messages).filter((m) => (resumed ? answeredBy(m) !== providerId : true) && !shownAlready.has(m.id)),
+      docNames: new Map(docs.map((d) => [d.id, d.name])),
+      level: typeof level === "string" ? level : undefined,
+      mode,
+      otherAnswer,
+      preset,
+    });
+  const [prompt, freshPrompt] = await Promise.all([promptFor(!!sessionId), promptFor(false)]);
+
+  const turn: Turn = {
+    kind,
+    id,
+    provider: providerId,
+    revises: revision ? { id: revision.id, target: revision.target } : null,
+    drafts: [],
+    latest: new Map(),
+    emit: () => {},
+    write: !readOnly,
+    web,
+    webQueries: [],
+    approvals: new Map(),
+    asked: 0,
+    signal: controller.signal,
+  };
+  turns.set(token, turn); // last: from here on, the ask route's release() removes it
+  return {
+    token,
+    turn,
+    controller,
+    provider,
+    providerId,
+    userMsg,
+    prompt,
+    freshPrompt,
+    dir,
+    readDirs,
+    mcp,
+    mcpTools,
+    web,
+    sessionId,
+    tag,
+    signature,
+    model: typeof model === "string" && /^[\w.-]+$/.test(model) ? model : null,
+    effort: typeof effort === "string" && provider.efforts.includes(effort) ? effort : null,
+  };
+}
+
+/** Run a prepared turn and stream it to the browser; `release` frees the chat when it ends. */
+function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, release: () => void) {
+  const { turn, provider, providerId, controller } = p;
+  return streamSSE(c, async (stream) => {
+    stream.onAbort(() => controller.abort());
+    // Chain writes so deltas always reach the client in order.
+    let chain = Promise.resolve();
+    const send = (event: string, data: unknown) =>
+      (chain = chain.then(() => stream.writeSSE({ event, data: JSON.stringify(data) })).catch(() => {}));
+    turn.emit = (event, data) => void send(event, data);
+
+    let assistant;
+    try {
+      void send("user", p.userMsg);
+      const run = (sessionId: string | null, prompt: string) =>
+        provider.run({
+          effort: p.effort,
           prompt,
-          cwd: dir,
-          readDirs,
-          mcp,
-          mcpTools,
-          web,
+          cwd: p.dir,
+          readDirs: p.readDirs,
+          mcp: p.mcp,
+          mcpTools: p.mcpTools,
+          web: p.web,
           sessionId,
-          model: cleanModel,
+          model: p.model,
           signal: controller.signal,
           onEvent: (e) => {
             if (e.type === "delta") void send("delta", e.text);
             else if (e.type === "tool") void send("tool", e);
           },
         });
+      let result = await run(p.sessionId, p.prompt);
+      // The CLI's session is gone (e.g. after reinstalling it): ask again in a new one, with
+      // the rules and the chat so far. Other errors (a usage limit, …) keep the session.
+      const restarted = !!result.resumeFailed && !!p.sessionId && !controller.signal.aborted;
+      if (restarted) result = await run(null, p.freshPrompt);
 
-        let content = result.response.trim();
-        let error = false;
-        if (result.status !== "ABORTED" && (result.error || !content)) {
-          error = true;
-          const resumeFailed = !!sessionId && !content;
-          content = result.error
-            ? `${provider.label}: ${result.error}` +
-              (resumeFailed ? `\n\n${provider.label} could not continue the earlier conversation. Ask again — it will start fresh, with this chat so far as context.` : "")
-            : result.denied.length
-              ? `${provider.label} stopped because it tried to use a tool that is not allowed here (${result.denied.join(", ")}). Try asking again, maybe more specifically.`
-              : `${provider.label} returned an empty answer.`;
-        }
-        const usedModel = result.model ?? cleanModel;
-        assistant = newMessage({
-          role: "assistant",
-          content,
-          error,
-          stopped: result.status === "ABORTED",
-          provider: providerId,
-          model: usedModel ?? undefined,
-          modelLabel: usedModel ? await provider.describeModel(usedModel).catch(() => usedModel) : undefined,
-          effort: cleanEffort ?? (await provider.defaultEffort().catch(() => null)) ?? undefined,
-          drafts: turn.drafts.length ? turn.drafts.map(asMessageDraft) : undefined,
-          webQueries: turn.webQueries.length ? turn.webQueries : undefined,
-        });
-        await updateChat(kind, id, (m) => {
-          m.messages.push(assistant!);
-          if (result.sessionId && !error) {
-            m.conversations[providerId] = result.sessionId;
-            m.sessionTags = { ...m.sessionTags, [providerId]: tag };
-            m.contextSigs = { ...m.contextSigs, [providerId]: signature };
-            m.toolsVersion = { ...m.toolsVersion, [providerId]: TOOLS_VERSION };
-          }
-          // A failed resume (e.g. the CLI's session file is gone) would fail forever: start over
-          // next time — the conversation so far is then handed over as context.
-          else if (error && !result.response.trim() && sessionId) delete m.conversations[providerId];
-        }).catch(() => {}); // the chat may have been deleted meanwhile
-      } catch (err) {
-        assistant = newMessage({
-          role: "assistant",
-          content: (err as Error).message,
-          error: true,
-          provider: providerId,
-          drafts: turn.drafts.length ? turn.drafts.map(asMessageDraft) : undefined,
-        });
-        await updateChat(kind, id, (m) => void m.messages.push(assistant!)).catch(() => {});
-      } finally {
-        release();
+      let content = result.response.trim();
+      let error = false;
+      if (result.status !== "ABORTED" && (result.error || !content)) {
+        error = true;
+        content = result.error
+          ? `${provider.label}: ${result.error}`
+          : result.denied.length
+            ? `${provider.label} stopped because it tried to use a tool that is not allowed here (${result.denied.join(", ")}). Try asking again, maybe more specifically.`
+            : `${provider.label} returned an empty answer.`;
       }
-      await send("done", assistant);
-    });
+      const usedModel = result.model ?? p.model;
+      assistant = newMessage({
+        role: "assistant",
+        content,
+        error,
+        stopped: result.status === "ABORTED",
+        provider: providerId,
+        model: usedModel ?? undefined,
+        modelLabel: usedModel ? await provider.describeModel(usedModel).catch(() => usedModel) : undefined,
+        effort: p.effort ?? (await provider.defaultEffort().catch(() => null)) ?? undefined,
+        drafts: turn.drafts.length ? turn.drafts.map(asMessageDraft) : undefined,
+        webQueries: turn.webQueries.length ? turn.webQueries : undefined,
+        newSession: restarted || undefined,
+      });
+      await updateChat(kind, id, (m) => {
+        m.messages.push(assistant!);
+        if (result.sessionId && !error) {
+          m.conversations[providerId] = result.sessionId;
+          m.sessionTags = { ...m.sessionTags, [providerId]: p.tag };
+          m.contextSigs = { ...m.contextSigs, [providerId]: p.signature };
+          m.toolsVersion = { ...m.toolsVersion, [providerId]: TOOLS_VERSION };
+        } else if (restarted) {
+          delete m.conversations[providerId]; // the next question starts a new session
+        }
+      }).catch(() => {}); // the chat may have been deleted meanwhile
+    } catch (err) {
+      assistant = newMessage({
+        role: "assistant",
+        content: (err as Error).message,
+        error: true,
+        provider: providerId,
+        drafts: turn.drafts.length ? turn.drafts.map(asMessageDraft) : undefined,
+      });
+      await updateChat(kind, id, (m) => void m.messages.push(assistant!)).catch(() => {});
+    } finally {
+      release();
+    }
+    await send("done", assistant);
   });
 }
+
 
 chatRoutes("doc", "/api/docs");
 chatRoutes("folder", "/api/folders");
