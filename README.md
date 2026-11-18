@@ -148,7 +148,7 @@ To find the right places quickly, ydust gives the tutor a map of every document 
 
 ## Privacy and security
 
-- **Your files stay on your computer.** PDFs, extracted text, chats and notes are stored in the `library/` folder next to the app.
+- **Your files stay on your computer.** PDFs, extracted text, chats and notes are stored in your library folder: `~/.local/share/ydust` on Linux, `~/Library/Application Support/ydust` on macOS, `%APPDATA%\ydust` on Windows (or `YDUST_LIBRARY`). Only you can read it.
 - **But the AI runs in the cloud.** What you ask, and the parts of your documents the assistant reads, are sent to the provider of the CLI you use (Google for Antigravity, Anthropic for Claude), under your account and their terms. Don't use ydust for documents you may not share with them.
 - **The assistant reads your documents and notes.** It can read the PDF's text (and, in a folder, the folder's other documents) and the chat's notes, nothing else on your computer. It cannot run commands or open web pages.
 - **It can propose note drafts; nothing is saved until you accept the diff.** Its only way to write is ydust's `write_note` tool, which stores a draft for you to review. The CLIs' own write and command tools stay off.
@@ -159,7 +159,8 @@ To find the right places quickly, ydust gives the tutor a map of every document 
   - Tests check that Claude is never given `Write`, `Edit`, `Bash` or `WebFetch`, gets `WebSearch` only in a turn with the globe on and never pre-approved, and that Antigravity's settings still deny writing, commands and URLs.
 - **Notes stay local** like everything else; the parts the assistant reads go to its provider, as above.
 - **No remote pictures.** Answers and notes never load pictures from the web (an image address could carry text out); a picture shows as a label instead.
-- **Local only.** The server listens on `127.0.0.1` and rejects requests from other websites, so a web page you visit can't use it through your browser. Keep it that way: the server drives an AI agent on your machine.
+- **Local only.** The server listens on `127.0.0.1` and rejects requests from other websites and from other local web servers (only its own port and the dev server's are accepted, and request bodies must be JSON or uploads), so a web page you visit can't use it through your browser. It also can't be shown inside another site's frame. Keep it that way: the server drives an AI agent on your machine.
+- **Shared computers** (e.g. a university lab): other users of the same computer could reach the server too. Start it with `YDUST_AUTH=1`: it then prints a sign-in link once at startup; open it once per browser, and every other request without that sign-in is refused.
 
 ## Configuration
 
@@ -167,7 +168,9 @@ Set these environment variables before starting, e.g. `PORT=9000 npm start` (Lin
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `YDUST_LIBRARY` | `./library` | Where PDFs, chats and notes are stored |
+| `YDUST_LIBRARY` | your user data folder (see [Privacy](#privacy-and-security)) | Where PDFs, chats and notes are stored |
+| `YDUST_AUTH` | off | `1`: require the sign-in link printed at startup (for shared computers) |
+| `YDUST_DEV_PORT` | `5173` | Port of the dev web server, whose pages the API accepts |
 | `PORT` | `8787` | Port of the server (the dev web server stays on `5173`) |
 | `HOST` | `127.0.0.1` | Bind address. Keep it local (see [Privacy and security](#privacy-and-security)). |
 | `AGY_BIN` | `agy` | Path to the Antigravity CLI |
@@ -183,6 +186,8 @@ Your preferences in the app (assistant, model, language, level, page colours, �
 - **"Could not continue the earlier conversation"**: the CLI's saved session is gone (e.g. after reinstalling it). Just ask again: a new session starts, with the chat so far as context.
 - **I can't select text / the tutor can't read the PDF**: it's probably a scanned PDF without a text layer. Use snipping (`S`) to send pictures of the parts you're asking about.
 - **Search finds nothing yet / answers ignore a document**: its text is still being read (*Reading pages…* in the sidebar). Keep the tab open until it's done.
+- **"Your library is still inside the app's folder"**: ydust 0.1 kept its data in `./library`. It still uses it while it is there, but a `git clean` could delete it, and Claude Code, started inside the repository, reads its CLAUDE.md and git status. Stop ydust and move the folder, e.g. `mv library ~/.local/share/ydust` (Linux), then start ydust again.
+- **"Not signed in"**: `YDUST_AUTH=1` is set. Open the sign-in link ydust printed in its terminal when it started.
 - **Port already in use**: start with another port, e.g. `PORT=8790 npm start` (see [Configuration](#configuration) for Windows).
 - **Antigravity seems to forget an older chat once**: after updating ydust, Antigravity chats from older versions start a new session once (the chat so far is handed over as context). That's expected.
 
@@ -195,7 +200,8 @@ browser (React + pdf.js)  ──POST /api/…/ask──▶  Hono server (Node)  
 ```
 
 - **Text extraction** happens in the browser with pdf.js: every page goes to `document.txt` (hyphenated line breaks joined), the outline to `outline.txt`.
-- **Each question** runs one headless turn of the selected CLI in the chat's folder (`library/<doc-id>/`, or `library/folders/<folder-id>/` for a folder chat). The other documents of the folder are added read-only with `--add-dir`. Sessions are resumed per CLI (`agy --conversation`, `claude --resume`).
+- **Each question** runs one headless turn of the selected CLI in the chat's folder (`<library>/<doc-id>/`, or `<library>/folders/<folder-id>/` for a folder chat). The other documents of the folder are added read-only with `--add-dir`. Sessions are resumed per CLI (`agy --conversation`, `claude --resume`); a chat runs one question at a time. If a session is gone (e.g. after reinstalling the CLI), the question is asked again at once in a new session, with the rules and the chat so far; other errors, like a usage limit, keep the session.
+- **The tutor rules** are also part of the CLI's system prompt (Claude Code's `--append-system-prompt-file` where available, Antigravity's agent file), so they outlast the compaction of long conversations.
 - **ydust's tools**: for every question ydust starts a tiny MCP server (`server/mcp/search.ts`, stdio, no dependencies) limited to the chat's documents and notes. `search(query, doc?)` uses the same forgiving matching as the in-app search and returns pages with excerpts (falling back to pages that contain all words); `read_pages(doc?, from, to?)` returns the exact text of up to 10 pages; `list_highlights(doc?, color?)` lists the user's highlights with their comments (these three only when a document has text). `list_notes()` and `read_note(name)` read the chat's notes. Claude Code gets the server via `--mcp-config` (only its tools pre-approved), Antigravity via `.agents/mcp_config.json` in the chat's folder (approved as `mcp(ydust/<tool>)`).
 - **Web search**: with the globe on, Claude Code gets `WebSearch` in `--tools` but not in `--allowedTools`, plus `--permission-prompt-tool mcp__ydust__approve`. So before each search it calls ydust's `approve` tool with the query, which allows nothing but a `WebSearch` and asks ydust: `POST /api/internal/approvals` (turn token as for drafts) waits while the browser shows the pop-up, and the user's click (`POST /api/…/approvals/:id`, optionally with an edited query) answers it with `{"behavior":"allow","updatedInput":{…}}` or `{"behavior":"deny","message":…}`. No answer in 5 minutes (Claude Code waits longer than that), or a stopped answer, is a denial. A resumed session accepts the changed tool set, so web questions continue the same conversation. Antigravity has no globe: headless `agy` can't ask for approval per action, and its `search_web` can't be limited by permission rules (`agy acp` could ask, but isn't used).
 - **Drafts**: `write_note(name, content, mode, summary)` (mode `create`, `append` or `replace`) never touches the note. The MCP server posts the draft to `POST /api/internal/drafts` with the answer's turn token (32 random bytes, valid only while that answer runs; requests from a browser, which carry `Origin` or `Sec-Fetch-Site`, are refused). ydust stores it as `notes/.drafts/<id>.json` with a hash of the note it was made against, streams it to the browser, and records it on the answer. Accepting checks that the note is still the version the diff was shown against (otherwise the card shows the new diff), writes it atomically and removes the draft. *Request changes* is a normal question that carries the draft; the next `write_note` for that note becomes version 2. At most 20 drafts per chat (200 kB each) are kept; *New chat* removes open drafts, never notes.
@@ -230,15 +236,16 @@ ydust writes the custom agent to `.agents/agents/ydust-tutor.md` and the documen
 
 ```
 claude --print --output-format stream-json --verbose --include-partial-messages \
-    --permission-mode default --tools Read Grep Glob [WebSearch --permission-prompt-tool mcp__ydust__approve] \
+    --permission-mode manual --tools Read Grep Glob [WebSearch --permission-prompt-tool mcp__ydust__approve] \
     --strict-mcp-config [--mcp-config .agents/claude-mcp.json] \
     --allowedTools mcp__ydust__search mcp__ydust__read_pages mcp__ydust__list_highlights mcp__ydust__list_notes mcp__ydust__read_note mcp__ydust__write_note \
+    [--append-system-prompt-file .agents/claude-system.md] \
     [--add-dir <other doc folder> …] [--resume <session-id>] [--model opus|sonnet|haiku] [--effort <level>]
 ```
 
-Claude Code has no "list models" command, so ydust resolves its aliases (`opus`, `sonnet`, `haiku`, `fable`) by starting `claude` and reading the model from its first output line (cached for 30 minutes).
+Older Claude Code versions call the permission mode `default` and lack `--append-system-prompt-file`; ydust checks once by starting `claude` without input, which stops before any request. Claude Code has no "list models" command: the aliases (`opus`, `sonnet`, `haiku`, `fable`) show their real model names once an answer has used them (Claude Code names the model in its first output line; ydust remembers it in `claude-models.json`).
 
-**Data layout** (in `library/`, or `YDUST_LIBRARY`):
+**Data layout** (in the library folder):
 
 ```
 library/
@@ -246,7 +253,8 @@ library/
 │   ├── document.pdf
 │   ├── document.txt      text of every page ("=== Page N ===")
 │   ├── outline.txt       bookmarks or page headings ("p. 12: Chapter 2")
-│   ├── meta.json         name, chat history, one session id per CLI
+│   ├── meta.json         name, pages, reading position, number of messages
+│   ├── chat.json         chat history, one session id per CLI
 │   ├── highlights.json   your coloured highlights (page, text, which occurrence, colour, comment)
 │   ├── images/           pictures attached in this PDF's chat
 │   ├── notes/            your notes for this PDF, plain Markdown (summary.md, …)
@@ -254,11 +262,14 @@ library/
 │   └── .agents/          written by ydust for the CLIs: Antigravity's read-only agent, settings and
 │                         document tools, Claude's MCP config
 ├── folders/<folder-id>/
-│   ├── folder.json       name, member documents, the folder chat
+│   ├── folder.json       name, member documents
+│   ├── chat.json         the folder chat
 │   ├── images/
 │   ├── notes/            notes for the whole folder
 │   └── .agents/
-└── state.json            next short document id
+├── state.json            next short document id
+├── claude-models.json    the full model names behind Claude's aliases, as last seen
+└── .auth-token           the sign-in token (only with YDUST_AUTH=1)
 ```
 
 ## Limitations and ideas

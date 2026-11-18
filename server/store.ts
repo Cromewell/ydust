@@ -1,8 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 
-export const LIBRARY_DIR = path.resolve(process.env.YDUST_LIBRARY ?? "library");
+/** Where apps keep per-user data on this OS. */
+function dataHome() {
+  if (process.platform === "win32") return process.env.APPDATA || path.join(homedir(), "AppData", "Roaming");
+  if (process.platform === "darwin") return path.join(homedir(), "Library", "Application Support");
+  return process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share");
+}
+
+/** Where ydust kept its data before 0.2: inside the app's folder (used as long as it exists). */
+export const LEGACY_LIBRARY_DIR = path.resolve("library");
+/**
+ * The library lives outside the app's folder: there, a `git clean` can't delete it, and the
+ * CLIs, started inside it, don't pick up the repository's CLAUDE.md or git status.
+ */
+export const DEFAULT_LIBRARY_DIR = path.join(dataHome(), "ydust");
+export const LIBRARY_DIR = path.resolve(process.env.YDUST_LIBRARY ?? (existsSync(LEGACY_LIBRARY_DIR) ? LEGACY_LIBRARY_DIR : DEFAULT_LIBRARY_DIR));
+/** Still using the old library inside the app's folder (index.ts explains how to move it). */
+export const LIBRARY_IN_APP_FOLDER = !process.env.YDUST_LIBRARY && LIBRARY_DIR === LEGACY_LIBRARY_DIR;
 const FOLDERS_DIR = path.join(LIBRARY_DIR, "folders");
 const STATE_PATH = path.join(LIBRARY_DIR, "state.json");
 
@@ -57,6 +75,10 @@ export type Message = {
   drafts?: MessageDraft[];
   /** User messages: web search was on for this question. */
   web?: boolean;
+  /** User messages: one of the app's built-in English prompts (Explain, a starter, …), not typed. */
+  preset?: boolean;
+  /** Assistant messages: the CLI's earlier session was gone, so this answer started a new one. */
+  newSession?: boolean;
   /** Assistant messages: the web searches the user allowed (with the query as it was run). */
   webQueries?: string[];
   /** Assistant messages: pinned to the notes, with an optional own note. */
@@ -80,7 +102,10 @@ export type ChatData = {
   toolsVersion?: Record<string, number>;
 };
 
-export type DocMeta = ChatData & {
+/** A chat's messages and CLI sessions, in chat.json next to meta.json / folder.json. */
+export const CHAT_KEYS = ["messages", "conversations", "sessionTags", "contextSigs", "toolsVersion"] as const;
+
+export type DocMeta = {
   id: string;
   name: string;
   /** Short, stable, never reused id the agent uses in citations ("d7"). */
@@ -92,26 +117,29 @@ export type DocMeta = ChatData & {
   /** Version of the client's text extraction that produced document.txt (re-extract when outdated). */
   textVersion?: number;
   lastPage: number;
-  /** @deprecated pre-multi-provider field (an agy conversation id); migrated on read. */
-  conversationId?: string | null;
+  /** Number of messages in its chat (kept here, so listing the library doesn't read every chat). */
+  messageCount?: number;
   createdAt: string;
   updatedAt: string;
 };
 
-type ChatKeys = keyof ChatData | "conversationId";
-export type DocSummary = Omit<DocMeta, ChatKeys> & { messageCount: number; folderId: string | null };
+export type DocSummary = Omit<DocMeta, "messageCount"> & { messageCount: number; folderId: string | null };
 
-export type FolderMeta = ChatData & {
+export type FolderMeta = {
   id: string;
   name: string;
   /** Member documents, in the order they were added. */
   docIds: string[];
+  messageCount?: number;
   createdAt: string;
   updatedAt: string;
 };
-export type FolderSummary = Omit<FolderMeta, keyof ChatData> & { messageCount: number };
+export type FolderSummary = Omit<FolderMeta, "messageCount"> & { messageCount: number };
 
 export type ChatKind = "doc" | "folder";
+
+/** The document or folder doesn't exist (any more): a 404 for the API. */
+export class NotFoundError extends Error {}
 
 const ID_RE = /^[0-9a-f-]{36}$/;
 
@@ -137,6 +165,7 @@ export const textPath = (id: string) => path.join(docDir(id), "document.txt");
 export const outlinePath = (id: string) => path.join(docDir(id), "outline.txt");
 const metaPath = (id: string) => path.join(docDir(id), "meta.json");
 const folderMetaPath = (id: string) => path.join(folderDir(id), "folder.json");
+const chatPath = (kind: ChatKind, id: string) => path.join(chatDir(kind, id), "chat.json");
 
 // --- Images (per chat) ---
 
@@ -221,30 +250,48 @@ export function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 // --- Documents ---
 
 export function summarize(meta: DocMeta, folderId: string | null = null): DocSummary {
-  const { messages, conversations: _c, conversationId: _o, sessionTags: _s, contextSigs: _x, toolsVersion: _t, ...rest } = meta;
-  return { ...rest, messageCount: messages.length, folderId };
+  return { ...meta, messageCount: meta.messageCount ?? 0, folderId };
 }
 
+/** What a meta.json / folder.json from before chat.json still holds of its chat. */
+type Legacy = Partial<ChatData> & { conversationId?: string | null };
+
+/** The chat fields of an old meta file (migrated to chat.json by migrateChats or the next chat write). */
+function legacyChat(raw: Legacy): ChatData {
+  return {
+    messages: raw.messages ?? [],
+    conversations: raw.conversations ?? (raw.conversationId ? { agy: raw.conversationId } : {}),
+    ...(raw.sessionTags ? { sessionTags: raw.sessionTags } : {}),
+    ...(raw.contextSigs ? { contextSigs: raw.contextSigs } : {}),
+    ...(raw.toolsVersion ? { toolsVersion: raw.toolsVersion } : {}),
+  };
+}
+const hasLegacyChat = (raw: object) => [...CHAT_KEYS, "conversationId"].some((k) => k in raw);
+
+/** Metadata without the chat fields an old file may still carry. */
+function withoutChat<T extends object>(raw: T & Legacy): T {
+  const out = { ...raw } as Record<string, unknown>;
+  for (const k of [...CHAT_KEYS, "conversationId"]) delete out[k];
+  if (out.messageCount === undefined && Array.isArray(raw.messages)) out.messageCount = raw.messages.length;
+  return out as T;
+}
+
+/** A document's metadata (small: name, pages, …). Its chat is in readChat. */
 export async function readMeta(id: string): Promise<DocMeta | null> {
-  const meta = await readJson<DocMeta>(metaPath(id));
-  if (!meta) return null;
-  if (!meta.conversations) {
-    meta.conversations = meta.conversationId ? { agy: meta.conversationId } : {};
-    delete meta.conversationId;
-  }
-  return meta;
+  const raw = await readJson<DocMeta & Legacy>(metaPath(id));
+  return raw && withoutChat<DocMeta>(raw);
 }
 
 export async function writeMeta(meta: DocMeta) {
   meta.updatedAt = new Date().toISOString();
-  await writeJson(metaPath(meta.id), meta);
+  await writeJson(metaPath(meta.id), withoutChat<DocMeta>(meta));
 }
 
-/** Serialize read-modify-write cycles per document. */
+/** Serialize read-modify-write cycles per document (its chat shares the lock). */
 export function updateMeta(id: string, fn: (meta: DocMeta) => void | Promise<void>) {
   return withLock(`doc:${id}`, async () => {
     const meta = await readMeta(id);
-    if (!meta) throw new Error("document not found");
+    if (!meta) throw new NotFoundError("document not found");
     await fn(meta);
     await writeMeta(meta);
     return meta;
@@ -301,8 +348,7 @@ export async function createDoc(name: string, data: Uint8Array): Promise<DocMeta
     pages: null,
     hasText: null,
     lastPage: 1,
-    conversations: {},
-    messages: [],
+    messageCount: 0,
     createdAt: now,
     updatedAt: now,
   };
@@ -323,8 +369,9 @@ const PAGE_MARKER = (n: number) => `=== Page ${n} ===`;
 /** Save the extracted text (and the outline, a few lines like "p. 12  Chapter 2 …"). */
 export async function writeText(id: string, pages: string[], outline?: string) {
   const body = pages.map((t, i) => `${PAGE_MARKER(i + 1)}\n${t.trim()}\n`).join("\n");
-  await writeFile(textPath(id), body);
-  if (outline?.trim()) await writeFile(outlinePath(id), outline.trim() + "\n");
+  // Atomically: ydust's MCP server may be reading it for a running answer.
+  await writeAtomic(textPath(id), body);
+  if (outline?.trim()) await writeAtomic(outlinePath(id), outline.trim() + "\n");
   else await rm(outlinePath(id), { force: true });
 }
 
@@ -363,26 +410,29 @@ export async function readPageText(id: string, page: number): Promise<string | n
 // --- Folders ---
 
 export function summarizeFolder(f: FolderMeta): FolderSummary {
-  const { messages, conversations: _c, sessionTags: _s, contextSigs: _x, toolsVersion: _t, ...rest } = f;
-  return { ...rest, messageCount: messages.length };
+  return { ...f, messageCount: f.messageCount ?? 0 };
 }
 
+/** A folder's metadata (name, documents). Its chat is in readChat. */
 export async function readFolder(id: string): Promise<FolderMeta | null> {
-  const f = await readJson<FolderMeta>(folderMetaPath(id));
-  if (!f) return null;
+  const raw = await readJson<FolderMeta & Legacy>(folderMetaPath(id));
+  if (!raw) return null;
+  const f = withoutChat<FolderMeta>(raw);
   f.docIds ??= [];
-  f.messages ??= [];
-  f.conversations ??= {};
   return f;
+}
+
+async function writeFolder(f: FolderMeta) {
+  f.updatedAt = new Date().toISOString();
+  await writeJson(folderMetaPath(f.id), withoutChat<FolderMeta>(f));
 }
 
 export function updateFolder(id: string, fn: (f: FolderMeta) => void | Promise<void>) {
   return withLock(`folder:${id}`, async () => {
     const f = await readFolder(id);
-    if (!f) throw new Error("folder not found");
+    if (!f) throw new NotFoundError("folder not found");
     await fn(f);
-    f.updatedAt = new Date().toISOString();
-    await writeJson(folderMetaPath(id), f);
+    await writeFolder(f);
     return f;
   });
 }
@@ -401,7 +451,7 @@ export async function createFolder(name: string): Promise<FolderMeta> {
   const id = randomUUID();
   await mkdir(folderDir(id), { recursive: true });
   const now = new Date().toISOString();
-  const f: FolderMeta = { id, name, docIds: [], messages: [], conversations: {}, createdAt: now, updatedAt: now };
+  const f: FolderMeta = { id, name, docIds: [], messageCount: 0, createdAt: now, updatedAt: now };
   await writeJson(folderMetaPath(id), f);
   return f;
 }
@@ -439,12 +489,59 @@ export async function chatExists(kind: ChatKind, id: string) {
   return !!(await stat(kind === "doc" ? metaPath(id) : folderMetaPath(id)).catch(() => null));
 }
 
-export function readChat(kind: ChatKind, id: string): Promise<(ChatData & { id: string; name: string }) | null> {
-  return kind === "doc" ? readMeta(id) : readFolder(id);
+const metaFileOf = (kind: ChatKind, id: string) => (kind === "doc" ? metaPath(id) : folderMetaPath(id));
+/** The same lock as updateMeta / updateFolder: chat and metadata writes of one chat never interleave. */
+const lockOf = (kind: ChatKind, id: string) => `${kind}:${id}`;
+
+/** The chat from chat.json, or (not migrated yet) from the old meta file. Null: no such document/folder. */
+async function loadChat(kind: ChatKind, id: string): Promise<{ chat: ChatData; raw: (Legacy & { id: string; name: string; messageCount?: number }) } | null> {
+  const raw = await readJson<Legacy & { id: string; name: string; messageCount?: number }>(metaFileOf(kind, id));
+  if (!raw) return null;
+  const stored = await readJson<ChatData>(chatPath(kind, id));
+  const chat = stored ? { ...stored, messages: stored.messages ?? [], conversations: stored.conversations ?? {} } : legacyChat(raw);
+  return { chat, raw };
 }
 
+/** A chat (of a document or a folder), with the name of what it is about. */
+export async function readChat(kind: ChatKind, id: string): Promise<(ChatData & { id: string; name: string }) | null> {
+  const got = await loadChat(kind, id);
+  return got && { ...got.chat, id: got.raw.id, name: got.raw.name };
+}
+
+/**
+ * Read-modify-write a chat. It goes to chat.json; the meta file only learns the new message
+ * count (and loses the chat fields of an old version, once chat.json holds them).
+ */
 export function updateChat(kind: ChatKind, id: string, fn: (c: ChatData) => void | Promise<void>): Promise<ChatData> {
-  return kind === "doc" ? updateMeta(id, fn) : updateFolder(id, fn);
+  return withLock(lockOf(kind, id), async () => {
+    const got = await loadChat(kind, id);
+    if (!got) throw new NotFoundError(kind === "doc" ? "document not found" : "folder not found");
+    const { chat, raw } = got;
+    await fn(chat);
+    await writeJson(chatPath(kind, id), chat);
+    if (raw.messageCount !== chat.messages.length || hasLegacyChat(raw)) {
+      const meta = { ...withoutChat<{ id: string }>(raw), messageCount: chat.messages.length };
+      if (kind === "doc") await writeMeta(meta as DocMeta);
+      else await writeFolder(meta as FolderMeta);
+    }
+    return chat;
+  });
+}
+
+/** Move the chats of old meta files into chat.json (once, at startup). */
+export async function migrateChats() {
+  const docs = (await readdir(LIBRARY_DIR, { withFileTypes: true }).catch(() => [])).filter((e) => e.isDirectory() && isValidId(e.name)).map((e) => ["doc", e.name] as const);
+  const folders = (await readdir(FOLDERS_DIR, { withFileTypes: true }).catch(() => [])).filter((e) => e.isDirectory() && isValidId(e.name)).map((e) => ["folder", e.name] as const);
+  for (const [kind, id] of [...docs, ...folders]) {
+    const raw = await readJson<object>(metaFileOf(kind, id));
+    if (raw && hasLegacyChat(raw)) await updateChat(kind, id, () => {}).catch(() => {});
+  }
+}
+
+/** Create the library, readable only by you (it holds your documents, notes and chats). */
+export async function ensureLibrary() {
+  await mkdir(LIBRARY_DIR, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") await chmod(LIBRARY_DIR, 0o700).catch(() => {});
 }
 
 export function newMessage(m: Omit<Message, "id" | "createdAt">): Message {

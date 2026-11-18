@@ -24,6 +24,8 @@ export type AgentResult = {
   error: string | null;
   /** The model that actually answered (full id), if the CLI reports it. */
   model?: string | null;
+  /** The session to resume no longer exists: nothing was answered, ask again in a new session. */
+  resumeFailed?: boolean;
 };
 
 export type RunOptions = {
@@ -127,6 +129,7 @@ export function runLines(
       setTimeout(() => killTree(child, true), 4000).unref();
     };
     opts.signal?.addEventListener("abort", onAbort, { once: true });
+    if (opts.signal?.aborted) onAbort(); // stopped while the turn was being prepared
     if (opts.stdin !== undefined) child.stdin!.end(opts.stdin);
     child.stderr!.on("data", (d) => (stderr += d.toString()));
     createInterface({ input: child.stdout! }).on("line", onLine);
@@ -149,18 +152,20 @@ export function runLines(
 export function runQuick(
   bin: string,
   args: string[],
-  opts: { timeout: number; env?: NodeJS.ProcessEnv },
-): Promise<{ ok: boolean; stdout: string; notFound: boolean }> {
+  opts: { timeout: number; env?: NodeJS.ProcessEnv; cwd?: string },
+): Promise<{ ok: boolean; stdout: string; stderr: string; notFound: boolean }> {
   return new Promise((resolve) => {
     let stdout = "";
+    let stderr = "";
     let done = false;
     const finish = (r: { ok: boolean; notFound: boolean }) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ ...r, stdout });
+      resolve({ ...r, stdout, stderr });
     };
-    const child = spawn(bin, args, { env: opts.env, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(bin, args, { env: opts.env, cwd: opts.cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    child.stderr!.on("data", (d) => (stderr += d.toString()));
     const timer = setTimeout(() => {
       killTree(child, true);
       finish({ ok: false, notFound: false });

@@ -87,22 +87,48 @@ export function PdfViewer({
   const pendingRange = useRef<Range | null>(null);
   const [highlights, setHighlights] = useState<Map<number, HighlightRect[]>>(() => new Map());
 
-  // Read every page's size up front so the scroll height is right before anything renders.
+  /** The page in view and how far into it, kept while the page sizes are corrected. */
+  const sizeAnchor = useRef<{ page: number; offset: number } | null>(null);
+
+  // Page sizes: the first page's for every page right away (most PDFs have one size), so even a
+  // long document opens at once; the real sizes follow in parallel batches and replace the guess.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const out: Size[] = [];
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const vp = page.getViewport({ scale: 1 });
-        out.push({ width: vp.width, height: vp.height });
+      const sizeOf = async (i: number): Promise<Size> => {
+        const vp = (await pdf.getPage(i)).getViewport({ scale: 1 });
+        return { width: vp.width, height: vp.height };
+      };
+      const first = await sizeOf(1);
+      if (cancelled) return;
+      setSizes(Array.from({ length: pdf.numPages }, () => first));
+      const all: Size[] = [first];
+      for (let i = 2; i <= pdf.numPages; i += 50) {
+        const batch = await Promise.all(Array.from({ length: Math.min(50, pdf.numPages - i + 1) }, (_, k) => sizeOf(i + k)));
+        if (cancelled) return;
+        all.push(...batch);
       }
-      if (!cancelled) setSizes(out);
-    })();
+      if (all.every((s) => s.width === first.width && s.height === first.height)) return;
+      const box = scrollRef.current;
+      const el = box?.querySelector<HTMLElement>(`[data-page="${currentPage.current}"]`);
+      if (box && el) sizeAnchor.current = { page: currentPage.current, offset: (box.scrollTop - el.offsetTop) / el.offsetHeight };
+      setSizes(all);
+    })().catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [pdf]);
+
+  // After the real sizes came in: the same spot stays in view.
+  useLayoutEffect(() => {
+    const a = sizeAnchor.current;
+    const box = scrollRef.current;
+    if (!a || !box) return;
+    sizeAnchor.current = null;
+    const el = box.querySelector<HTMLElement>(`[data-page="${a.page}"]`);
+    if (el) box.scrollTop = el.offsetTop + a.offset * el.offsetHeight;
+    prevScale.current = scale; // already placed for the new layout (fit-width may have changed the zoom)
+  }, [sizes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const scrollToPage = useCallback((page: number, smooth = false) => {
     const el = scrollRef.current?.querySelector<HTMLElement>(`[data-page="${page}"]`);

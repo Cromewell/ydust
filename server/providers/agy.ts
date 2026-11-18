@@ -2,6 +2,7 @@ import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { MCP_NAME, type McpServer } from "../mcp/launch.ts";
+import { SYSTEM_RULES } from "../prompt.ts";
 import { cached, cliFile, runLines, runQuick, writeFileIfChanged, type AgentResult, type Model, type Provider, type RunOptions } from "./types.ts";
 
 const AGY_BIN = process.env.AGY_BIN ?? "agy";
@@ -22,8 +23,9 @@ mainAgent: true
 subagent: false
 commandExecutionPolicy: off
 ---
-You are a study tutor. You can only read files; follow the user's instructions about which files to read.
-`;
+You can only read files; follow the user's instructions about which files to read.
+
+${SYSTEM_RULES}`;
 /** Bump when the agent's tools change: sessions started with another setup are not resumed. */
 const SESSION_TAG = "agent-read-only-1";
 
@@ -93,13 +95,18 @@ async function run(opts: RunOptions): Promise<AgentResult> {
   let lastTextStep = -1;
   let gotResult = false;
   let extra = "";
+  // A conversation that no longer exists: agy only warns and starts a new, empty one, which
+  // would answer without the rules and the chat so far. Stop it right away and say so.
+  let resumeFailed = false;
+  const giveUp = new AbortController();
+  const signal = opts.signal ? AbortSignal.any([opts.signal, giveUp.signal]) : giveUp.signal;
 
   const { code, aborted, stderr } = await runLines(
     AGY_BIN,
     args,
     {
       cwd: opts.cwd,
-      signal: opts.signal,
+      signal,
       label: "Antigravity CLI",
       stdin: JSON.stringify({ event: "user", message: { content: opts.prompt } }) + "\n",
     },
@@ -112,6 +119,11 @@ async function run(opts: RunOptions): Promise<AgentResult> {
         return;
       }
       if (e.event === "init" && e.conversation_id) {
+        if (opts.sessionId && e.conversation_id !== opts.sessionId) {
+          resumeFailed = true;
+          giveUp.abort();
+          return;
+        }
         sessionId = e.conversation_id;
         opts.onEvent({ type: "init", sessionId: e.conversation_id });
       } else if (e.event === "step_update") {
@@ -149,6 +161,9 @@ async function run(opts: RunOptions): Promise<AgentResult> {
 
   // agy doesn't report the model; it's either the chosen one or its configured default.
   const model = opts.model ?? (await defaultModel())?.detail ?? null;
+  if (resumeFailed && !opts.signal?.aborted) {
+    return { sessionId: null, response: "", status: "ERROR", denied, error: `conversation ${opts.sessionId} not found`, model, resumeFailed };
+  }
   if (aborted) return { sessionId, response, status: "ABORTED", denied, error: null, model };
   const diag = (stderr + extra).trim();
   if (!gotResult && code !== 0) return { sessionId, response, status: "ERROR", denied, error: diag || `agy exited with code ${code}`, model };

@@ -202,6 +202,8 @@ function NoteGroup({
 function NoteRow({ owner, note, onOpen, onChanged }: { owner: NoteOwner; note: NoteInfo; onOpen: () => void; onChanged: () => void }) {
   const [renaming, setRenaming] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fail = (what: string) => (err: unknown) => setError(`Could not ${what}: ${(err as Error).message}`);
   if (renaming) {
     return (
       <li>
@@ -218,7 +220,7 @@ function NoteRow({ owner, note, onOpen, onChanged }: { owner: NoteOwner; note: N
     );
   }
   return (
-    <li className="group flex items-center gap-1 rounded-lg pr-1 hover:bg-zinc-50 dark:hover:bg-zinc-900">
+    <li className="group flex flex-wrap items-center gap-1 rounded-lg pr-1 hover:bg-zinc-50 dark:hover:bg-zinc-900">
       <button onClick={onOpen} className="flex min-w-0 flex-1 items-start gap-2 px-2 py-1.5 text-left">
         <NotebookPen className="mt-0.5 size-3.5 shrink-0 text-zinc-400" />
         <span className="min-w-0 flex-1">
@@ -234,7 +236,10 @@ function NoteRow({ owner, note, onOpen, onChanged }: { owner: NoteOwner; note: N
           <Pencil className="size-3" />
         </button>
         <button
-          onClick={() => void api.getNote(owner, note.name).then((n) => downloadText(n.name, n.content))}
+          onClick={() => {
+            setError(null);
+            void api.getNote(owner, note.name).then((n) => downloadText(n.name, n.content), fail("download it"));
+          }}
           className="icon-btn size-6"
           title="Download"
         >
@@ -244,7 +249,14 @@ function NoteRow({ owner, note, onOpen, onChanged }: { owner: NoteOwner; note: N
           <button
             autoFocus
             onBlur={() => setConfirm(false)}
-            onClick={() => void api.removeNote(owner, note.name).then(onChanged)}
+            onClick={() => {
+              setError(null);
+              void api.removeNote(owner, note.name).then(onChanged, (err) => {
+                setConfirm(false);
+                fail("delete it")(err);
+                onChanged(); // it may be gone already: show the list as it is
+              });
+            }}
             className="rounded-md bg-red-600 px-1.5 py-0.5 text-[11px] font-medium text-white"
           >
             Delete
@@ -255,6 +267,11 @@ function NoteRow({ owner, note, onOpen, onChanged }: { owner: NoteOwner; note: N
           </button>
         )}
       </div>
+      {error && (
+        <p role="alert" className="w-full px-2 pb-1 text-[11px] text-red-600">
+          {error}
+        </p>
+      )}
     </li>
   );
 }

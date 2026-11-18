@@ -51,6 +51,10 @@ export type Message = {
   drafts?: MessageDraft[];
   /** User messages: web search was on. */
   web?: boolean;
+  /** User messages: one of the app's built-in prompts (Explain, a starter, …). */
+  preset?: boolean;
+  /** Assistant messages: the CLI's earlier session was gone, so this answer started a new one. */
+  newSession?: boolean;
   /** Assistant messages: the web searches the user allowed. */
   webQueries?: string[];
   /** Assistant messages: pinned to the notes, with an optional own note. */
@@ -259,6 +263,8 @@ export async function ask(
     note?: { name: string; lines?: [number, number] };
     /** Web search for this question, each query approved by the user. */
     web?: boolean;
+    /** One of the app's built-in English prompts: the answer follows the document's language. */
+    preset?: boolean;
     secondOpinionOf?: string;
     draftId?: string;
     quote?: Quote;

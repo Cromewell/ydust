@@ -22,44 +22,26 @@ import { HighlightsPanel, SideTabs, type SideTab } from "./components/Highlights
 import { NotePicker, type Anchor } from "./components/NotePicker";
 import type { OpenNote } from "./components/NotesPanel";
 import { OutlinePanel } from "./components/OutlinePanel";
-import { PdfViewer, type Flash, type HighlightClick, type Mark, type PdfSelection, type SearchState, type Zoom } from "./components/PdfViewer";
-import { SearchBar, type SearchHit } from "./components/SearchBar";
+import { PdfViewer, type Flash, type Mark, type PdfSelection, type Zoom } from "./components/PdfViewer";
+import { SearchBar } from "./components/SearchBar";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { Sidebar } from "./components/Sidebar";
-import { api, ask, HL_COLORS, type Approval, type AskMode, type Chat, type Highlight, type HlColor, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
+import { api, ask, type Approval, type AskMode, type Chat, type Highlight, type HlColor, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
 import { downloadText, highlightsMarkdown, questionOf, safeFilename } from "./lib/export";
 import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
 import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
 import type { TextSize } from "./lib/settings";
-import { findInString, snippet } from "./lib/textMatch";
-import { TEXT_VERSION, extractAllText, loadPdf, renderRegion, type PageRect, type PDFDocumentProxy } from "./lib/pdf";
-
-const store = {
-  get(key: string) {
-    try {
-      return localStorage.getItem(`ydust:${key}`);
-    } catch {
-      return null;
-    }
-  },
-  set(key: string, value: string) {
-    try {
-      localStorage.setItem(`ydust:${key}`, value);
-    } catch {
-      /* ignore */
-    }
-  },
-};
+import { loadPdf, renderRegion, type PageRect, type PDFDocumentProxy } from "./lib/pdf";
+import { store } from "./lib/storage";
+import { useChatWidth } from "./hooks/useChatWidth";
+import { useDocSearch } from "./hooks/useDocSearch";
+import { useHighlights } from "./hooks/useHighlights";
+import { needsText, useTextExtraction } from "./hooks/useTextExtraction";
 
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 const MAX_ATTACHMENTS = 10;
 const SIDEBAR_WIDTH = 256;
-const CHAT_DEFAULT = 420;
-const CHAT_MIN = 300;
-const VIEWER_MIN = 320;
 
-/** Text not extracted yet, or by an older extraction. */
-const needsText = (d: { hasText: boolean | null; textVersion?: number }) => d.hasText === null || (d.textVersion ?? 1) < TEXT_VERSION;
 const byName = (a: FolderSummary, b: FolderSummary) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
 
 const isTyping = (t: EventTarget | null) =>
@@ -72,8 +54,6 @@ export default function App() {
   const [doc, setDoc] = useState<DocMeta | null>(null);
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  /** Text extraction in progress, per document. */
-  const [progress, setProgress] = useState<Record<string, { done: number; total: number }>>({});
   /** Open this page (and flash this text) once that document has loaded. */
   const pendingOpen = useRef<{ doc: string; page: number; text?: string } | null>(null);
 
@@ -120,28 +100,14 @@ export default function App() {
   const [showOutline, setShowOutline] = useState(() => store.get("outline") === "1");
   const [sideTab, setSideTab] = useState<SideTab>(() => (store.get("sideTab") === "highlights" ? "highlights" : "contents"));
 
-  // --- Highlights of the open PDF ---
-  const [highlights, setHighlights] = useState<Highlight[]>([]);
-  const [hlColor, setHlColor] = useState<HlColor>(() => {
-    const c = store.get("hlColor");
-    return HL_COLORS.includes(c as HlColor) ? (c as HlColor) : "yellow";
-  });
-  const [hlMenu, setHlMenu] = useState<HighlightClick | null>(null);
   const [showMarks, setShowMarks] = useState(() => store.get("marks") !== "0");
   const [appearance, setAppearance] = useState<PdfAppearance>(() => parseAppearance(store.get("appearance")));
   const pagesFilter = pageFilter(appearance);
   const pagesTint = tintColor(appearance.kelvin);
   const [flashTarget, setFlashTarget] = useState<Flash | null>(null);
 
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
-  const [searchIndex, setSearchIndex] = useState(0);
-  const [searchNonce, setSearchNonce] = useState(0);
-  const [searchFocus, setSearchFocus] = useState(0);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [pagesVersion, setPagesVersion] = useState(0);
-  const pageTexts = useRef<{ id: string; pages: string[] } | null>(null);
+  const search = useDocSearch(doc, page);
+  const forgetPageTexts = search.forget;
   const [textSize, setTextSize] = useState<TextSize>(() => (store.get("textSize") as TextSize | null) ?? "s");
 
   const [attachments, setAttachmentsState] = useState<Attachment[]>([]);
@@ -154,12 +120,11 @@ export default function App() {
   const [snipping, setSnipping] = useState(false);
   const [snipped, setSnipped] = useState<Attachment | null>(null); // "take another or done?" card
 
-  const [chatWidth, setChatWidth] = useState(() => Number(store.get("chatWidth")) || CHAT_DEFAULT);
-  const [winWidth, setWinWidth] = useState(() => window.innerWidth);
-  const [resizing, setResizing] = useState(false);
 
   const [showSidebar, setShowSidebar] = useState(true);
   const [showChat, setShowChat] = useState(true);
+  const chatWidth = useChatWidth(showSidebar ? SIDEBAR_WIDTH : 0);
+  const resizing = chatWidth.resizing;
   const [dragging, setDragging] = useState(false);
   const chatRef = useRef<ChatPanelHandle>(null);
 
@@ -179,6 +144,10 @@ export default function App() {
     setToast(msg);
     setTimeout(() => setToast((t) => (t === msg ? null : t)), 4000);
   }, []);
+
+  // --- Highlights of the open PDF ---
+  const hl = useHighlights(activeId, flash);
+  const highlights = hl.list;
 
   // Library + models on startup.
   useEffect(() => {
@@ -204,56 +173,12 @@ export default function App() {
   }, [flash]);
 
   // --- Text extraction: document.txt + outline.txt, so the agent can read every document ---
-  const indexJobs = useRef(new Map<string, Promise<void>>());
-  const failedIndex = useRef(new Set<string>());
-  const [indexTick, setIndexTick] = useState(0);
-  const indexDoc = useCallback((id: string, loaded?: PDFDocumentProxy) => {
-    const jobs = indexJobs.current;
-    const running = jobs.get(id);
-    if (running) return running;
-    const job = (async () => {
-      const task = loaded ? null : loadPdf(api.fileUrl(id));
-      try {
-        const p = loaded ?? (await task!.promise);
-        setProgress((x) => ({ ...x, [id]: { done: 0, total: p.numPages } }));
-        const { pages, outline } = await extractAllText(p, (done, total) => setProgress((x) => ({ ...x, [id]: { done, total } })));
-        const s = await api.putText(id, pages, TEXT_VERSION, outline);
-        if (pageTexts.current?.id === id) pageTexts.current = null;
-        setDocs((list) => list.map((x) => (x.id === id ? s : x)));
-        setDoc((d) => (d && d.id === id ? { ...d, pages: s.pages, hasText: s.hasText, textVersion: s.textVersion } : d));
-        setChat((c) => (c && c.kind === "doc" && c.id === id ? { ...c, hasText: s.hasText } : c));
-      } catch {
-        // An open document's PDF is destroyed when you switch away: retried in the background.
-        if (!loaded) failedIndex.current.add(id);
-      } finally {
-        void task?.destroy();
-        setProgress(({ [id]: _, ...rest }) => rest);
-        jobs.delete(id);
-        setIndexTick((t) => t + 1);
-      }
-    })();
-    jobs.set(id, job);
-    return job;
-  }, []);
-
-  // In the background, one at a time: every document that isn't extracted (or is outdated).
-  useEffect(() => {
-    if (indexJobs.current.size) return;
-    const next = docs.find((d) => d.id !== activeId && needsText(d) && !failedIndex.current.has(d.id));
-    if (next) void indexDoc(next.id);
-  }, [docs, activeId, indexTick, indexDoc]);
-
-  // Its highlights.
-  useEffect(() => {
-    setHighlights([]);
-    setHlMenu(null);
-    if (!activeId) return;
-    let cancelled = false;
-    api.listHighlights(activeId).then((l) => !cancelled && setHighlights(l), () => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId]);
+  const { progress, extract: indexDoc } = useTextExtraction(docs, activeId, (s) => {
+    forgetPageTexts(s.id);
+    setDocs((list) => list.map((x) => (x.id === s.id ? s : x)));
+    setDoc((d) => (d && d.id === s.id ? { ...d, pages: s.pages, hasText: s.hasText, textVersion: s.textVersion } : d));
+    setChat((c) => (c && c.kind === "doc" && c.id === s.id ? { ...c, hasText: s.hasText } : c));
+  });
 
   // Load the active document and its PDF.
   useEffect(() => {
@@ -263,7 +188,6 @@ export default function App() {
     setSelection(null);
     setJump(null);
     setFlashTarget(null);
-    setSearchHits([]);
     setSnipping(false);
     setSnipped(null);
     if (!activeId) return;
@@ -533,7 +457,16 @@ export default function App() {
       question: string,
       withQuote: Quote | null,
       withImages: Attachment[] = [],
-      opts: { mode?: AskMode; secondOpinionOf?: string; via?: string; draft?: MessageDraft; note?: { name: string; lines?: [number, number] }; web?: boolean } = {},
+      opts: {
+        mode?: AskMode;
+        secondOpinionOf?: string;
+        via?: string;
+        draft?: MessageDraft;
+        note?: { name: string; lines?: [number, number] };
+        web?: boolean;
+        /** One of the app's built-in English prompts (Explain, a starter, …): the answer follows the document's language. */
+        preset?: boolean;
+      } = {},
     ) => {
       if (!target || abortRef.current) return;
       const t = target;
@@ -576,9 +509,20 @@ export default function App() {
         draftRef: opts.draft ? { id: opts.draft.id, target: opts.draft.target, revision: opts.draft.revision } : undefined,
         noteRef: opts.note ? { name: opts.note.name, lines: opts.note.lines, instructions: question.trim() || undefined } : undefined,
         web: opts.web || undefined,
+        preset: opts.preset || undefined,
         createdAt: new Date().toISOString(),
       });
       let partial = "";
+      let finished = false;
+      // Deltas arrive many times a second: re-render (and re-parse the Markdown) at most once per frame.
+      let pending = "";
+      let frame = 0;
+      const flushText = () => {
+        frame = 0;
+        const text = pending;
+        pending = "";
+        if (text) setStreaming((s) => (s ? { ...s, text: s.text + text } : s));
+      };
       try {
         await ask(
           t,
@@ -596,12 +540,17 @@ export default function App() {
             draftId: opts.draft?.id,
             note: opts.note,
             web: opts.web || undefined,
+            preset: opts.preset || undefined,
           },
           {
-            onUser: (m) => pushMessage(key, m),
-            onDelta: (t) => {
-              partial += t;
-              setStreaming((s) => (s ? { ...s, text: s.text + t } : s));
+            onUser: (m) => {
+              pushMessage(key, m);
+              countMessages(t, 1);
+            },
+            onDelta: (text) => {
+              partial += text;
+              pending += text;
+              if (!frame) frame = requestAnimationFrame(flushText);
             },
             onTool: (t) => setStreaming((s) => (s ? { ...s, tools: [...s.tools, t] } : s)),
             onApproval: (a) => setApprovals((list) => [...list, { target: t, via, a }]),
@@ -610,24 +559,29 @@ export default function App() {
               setStreaming((s) => (s ? { ...s, drafts: [...s.drafts.filter((x) => x.id !== d.replaces), d] } : s));
               if (d.replaces) markDrafts(key, { [d.replaces]: { status: "superseded" } });
             },
-            onDone: (m) => pushMessage(key, m),
+            onDone: (m) => {
+              finished = true;
+              pushMessage(key, m);
+              countMessages(t, 1);
+            },
           },
           controller.signal,
         );
       } catch (e) {
-        if (controller.signal.aborted) {
-          if (partial.trim()) {
-            pushMessage(key, { id: crypto.randomUUID(), role: "assistant", content: partial, stopped: true, createdAt: new Date().toISOString() });
-          }
-        } else {
+        // Not an answer: a refused question or a lost connection, shown here only.
+        if (!controller.signal.aborted) {
           pushMessage(key, { id: crypto.randomUUID(), role: "assistant", content: (e as Error).message, error: true, createdAt: new Date().toISOString() });
+          finished = true;
         }
       } finally {
+        cancelAnimationFrame(frame);
         if (abortRef.current === controller) abortRef.current = null;
         setStreaming(null);
         setApprovals((list) => list.filter((x) => chatKeyOf(x.target) !== key));
-        countMessages(t, 2);
       }
+      // The answer ended without the server's message (cut off, or stopped the hard way): show
+      // what the server saved, with its ids, once it is done, instead of a copy only the browser knows.
+      if (!finished && partial.trim()) void reloadChat(t);
     },
     [target, models, efforts, provider, language, level, flash, setAttachments, setPanelTab], // eslint-disable-line react-hooks/exhaustive-deps
   );
@@ -752,61 +706,37 @@ export default function App() {
     requestAnimationFrame(() => chatRef.current?.showMessage(messageId));
   }, []);
 
-  // --- Search in the document (page texts come from document.txt) ---
-  useEffect(() => {
-    if (!searchOpen || !doc || pageTexts.current?.id === doc.id || !doc.hasText) return;
-    let cancelled = false;
-    setSearchLoading(true);
-    api
-      .pages(doc.id)
-      .then((r) => {
-        if (cancelled) return;
-        pageTexts.current = { id: doc.id, pages: r.pages };
-        setPagesVersion((v) => v + 1);
-      })
-      .catch(() => {})
-      .finally(() => !cancelled && setSearchLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [searchOpen, doc?.id, doc?.hasText]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const q = searchQuery.trim();
-    const texts = pageTexts.current?.id === doc?.id ? pageTexts.current?.pages : null;
-    if (!searchOpen || q.length < 2 || !texts) {
-      setSearchHits([]);
-      return;
+  /** Load a chat again from the server (once its answer has ended), if it is still on screen. */
+  const reloadChat = async (t: ChatTarget) => {
+    for (let i = 0; i < 20; i++) {
+      const c = await api.getChat(t).catch(() => null);
+      if (!c) return;
+      if (!c.busy || i === 19) {
+        setChat((cur) => (cur && chatKeyOf(cur) === chatKeyOf(t) && !abortRef.current ? { ...cur, messages: c.messages } : cur));
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
     }
-    const t = setTimeout(() => {
-      const hits: SearchHit[] = [];
-      texts.forEach((text, i) => {
-        findInString(text, q, 1000 - hits.length).forEach(([a, b], n) => hits.push({ page: i + 1, n, ...snippet(text, a, b) }));
-      });
-      setSearchHits(hits);
-      // Start at the first hit at or after the page you're reading.
-      const from = hits.findIndex((h) => h.page >= page);
-      setSearchIndex(from === -1 ? 0 : from);
-      setSearchNonce(Date.now());
-    }, 180);
-    return () => clearTimeout(t);
-  }, [searchQuery, searchOpen, pagesVersion, doc?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  };
 
-  const searchState = useMemo<SearchState | null>(() => {
-    if (!searchOpen || searchQuery.trim().length < 2) return null;
-    const h = searchHits[searchIndex];
-    return { query: searchQuery.trim(), current: h ? { page: h.page, n: h.n } : null, nonce: searchNonce };
-  }, [searchOpen, searchQuery, searchHits, searchIndex, searchNonce]);
-
+  /**
+   * Stop the answer: the server ends it and sends what it saved (with its real id, so pin and
+   * second opinion work on it). Only if that doesn't arrive, the request is cut.
+   */
   const stop = () => {
-    abortRef.current?.abort();
-    if (target) void api.stop(target).catch(() => {});
+    const controller = abortRef.current;
+    if (!target || !controller) return;
+    setStreaming((s) => (s ? { ...s, stopping: true } : s));
+    void api.stop(target).catch(() => controller.abort());
+    setTimeout(() => controller.abort(), 10_000);
   };
 
   const reset = async () => {
     if (!target) return;
     const t = target;
-    stop();
+    // Clearing anyway: no need to wait for the stopped answer.
+    abortRef.current?.abort();
+    void api.stop(t).catch(() => {});
     try {
       const { messages } = await api.reset(t);
       setChat((c) => (c && chatKeyOf(c) === chatKeyOf(t) ? { ...c, messages } : c));
@@ -828,40 +758,11 @@ export default function App() {
   const highlightSelection = useCallback(
     async (color: HlColor) => {
       const sel = selection;
-      const docId = activeId;
-      if (!sel || !docId) return;
+      if (!sel) return;
       takeSelection();
-      setHlColor(color);
-      store.set("hlColor", color);
-      try {
-        const h = await api.addHighlight(docId, { page: sel.page, text: sel.text, occurrence: sel.occurrence, color });
-        setHighlights((list) => [...list, h].sort((a, b) => a.page - b.page || a.createdAt.localeCompare(b.createdAt)));
-      } catch (e) {
-        flash(`Could not highlight: ${(e as Error).message}`);
-      }
+      await hl.add(sel, color);
     },
-    [selection, activeId, takeSelection, flash],
-  );
-  const changeHighlight = useCallback(
-    async (id: string, patch: { color?: HlColor; comment?: string }) => {
-      if (!activeId) return;
-      setHighlights((list) => list.map((h) => (h.id === id ? { ...h, ...patch, comment: patch.comment === undefined ? h.comment : patch.comment || undefined } : h)));
-      if (patch.color) {
-        setHlColor(patch.color);
-        store.set("hlColor", patch.color);
-      }
-      await api.patchHighlight(activeId, id, patch).catch((e) => flash(`Could not save: ${(e as Error).message}`));
-    },
-    [activeId, flash],
-  );
-  const removeHighlight = useCallback(
-    async (id: string) => {
-      if (!activeId) return;
-      setHlMenu(null);
-      setHighlights((list) => list.filter((h) => h.id !== id));
-      await api.removeHighlight(activeId, id).catch((e) => flash(`Could not delete: ${(e as Error).message}`));
-    },
-    [activeId, flash],
+    [selection, takeSelection, hl.add], // eslint-disable-line react-hooks/exhaustive-deps
   );
   /** A highlight (with its comment) as a quote for a note. */
   const highlightBlock = useCallback(
@@ -874,8 +775,8 @@ export default function App() {
   );
   // A new selection closes the highlight menu.
   useEffect(() => {
-    if (selection) setHlMenu(null);
-  }, [selection]);
+    if (selection) hl.setMenu(null);
+  }, [selection, hl.setMenu]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const askAboutSelection = useCallback(() => {
     const q = takeSelection();
@@ -948,9 +849,8 @@ export default function App() {
         // Our search knows every page (the browser's only sees the rendered ones).
         e.preventDefault();
         const sel = window.getSelection()?.toString().trim();
-        if (sel && sel.length < 80) setSearchQuery(sel.replace(/\s+/g, " "));
-        setSearchOpen(true);
-        setSearchFocus(Date.now());
+        if (sel && sel.length < 80) search.setQuery(sel.replace(/\s+/g, " "));
+        search.show();
       } else if (e.key === "Escape" && (snipping || snipped)) {
         if (snipped) finishSnipping();
         else setSnipping(false);
@@ -966,40 +866,6 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [askAboutSelection, selection, snipping, snipped, startSnip, finishSnipping, pdf]);
-
-  // --- Resizable chat panel ---
-  useEffect(() => {
-    const onResize = () => setWinWidth(window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-  const maxChat = Math.max(CHAT_MIN, winWidth - (showSidebar ? SIDEBAR_WIDTH : 0) - VIEWER_MIN);
-  const effectiveChatWidth = Math.min(Math.max(chatWidth, CHAT_MIN), maxChat);
-
-  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    const handle = e.currentTarget;
-    handle.setPointerCapture(e.pointerId);
-    setResizing(true);
-    let width = effectiveChatWidth;
-    const onMove = (ev: PointerEvent) => {
-      width = Math.min(Math.max(window.innerWidth - ev.clientX, CHAT_MIN), maxChat);
-      setChatWidth(width);
-    };
-    const onUp = () => {
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
-      handle.removeEventListener("pointercancel", onUp);
-      handle.removeEventListener("lostpointercapture", onUp);
-      setResizing(false);
-      store.set("chatWidth", String(Math.round(width)));
-    };
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
-    handle.addEventListener("pointercancel", onUp);
-    handle.addEventListener("lostpointercapture", onUp, { once: true });
-  };
 
   const zoomBy = (dir: 1 | -1) => {
     const i = ZOOM_STEPS.findIndex((z) => z >= scale - 0.001);
@@ -1106,11 +972,8 @@ export default function App() {
               </button>
               <div className="mx-1 h-5 w-px bg-zinc-200 dark:bg-zinc-800" />
               <button
-                onClick={() => {
-                  setSearchOpen((o) => !o);
-                  setSearchFocus(Date.now());
-                }}
-                className={clsx("icon-btn", searchOpen && "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100")}
+                onClick={search.toggle}
+                className={clsx("icon-btn", search.open && "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100")}
                 title="Search in document (Ctrl+F)"
               >
                 <Search className="size-4" />
@@ -1182,20 +1045,17 @@ export default function App() {
           </div>
         )}
         <div className="relative min-h-0 min-w-0 flex-1">
-          {searchOpen && pdf && doc && (
+          {search.open && pdf && doc && (
             <SearchBar
-              query={searchQuery}
-              onQuery={setSearchQuery}
-              hits={searchHits}
-              current={searchIndex}
-              loading={searchLoading}
+              query={search.query}
+              onQuery={search.setQuery}
+              hits={search.hits}
+              current={search.index}
+              loading={search.loading}
               unavailable={doc.hasText === false}
-              focusNonce={searchFocus}
-              onGo={(i) => {
-                setSearchIndex(i);
-                setSearchNonce(Date.now());
-              }}
-              onClose={() => setSearchOpen(false)}
+              focusNonce={search.focusNonce}
+              onGo={search.go}
+              onClose={search.close}
             />
           )}
           {snipping && (
@@ -1260,7 +1120,7 @@ export default function App() {
               onScale={setScale}
               snipping={snipping}
               onSnip={handleSnip}
-              search={searchState}
+              search={search.state}
               marks={marks}
               flash={flashTarget}
               onMarkClick={showMessage}
@@ -1268,7 +1128,7 @@ export default function App() {
               tint={pagesTint}
               darkPages={appearance.mode === "dark"}
               userHighlights={highlights}
-              onHighlightClick={setHlMenu}
+              onHighlightClick={hl.setMenu}
             />
           )}
         </div>
@@ -1276,17 +1136,14 @@ export default function App() {
       </main>
 
       {showChat && chat && (
-        <div className="relative shrink-0 border-l border-zinc-200 dark:border-zinc-800" style={{ width: effectiveChatWidth }}>
+        <div className="relative shrink-0 border-l border-zinc-200 dark:border-zinc-800" style={{ width: chatWidth.width }}>
           <div
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize chat"
             title="Drag to resize · double-click to reset"
-            onPointerDown={startResize}
-            onDoubleClick={() => {
-              setChatWidth(CHAT_DEFAULT);
-              store.set("chatWidth", String(CHAT_DEFAULT));
-            }}
+            onPointerDown={chatWidth.startResize}
+            onDoubleClick={chatWidth.reset}
             className="group absolute inset-y-0 -left-1.5 z-30 w-3 cursor-col-resize"
           >
             <div
@@ -1329,8 +1186,8 @@ export default function App() {
               store.set(`effort:${provider}`, e);
             }}
             onClearQuote={() => setQuote(null)}
-            onSend={(q) => {
-              void send(q, quote, attachments, { mode: checkMode ? "check" : undefined, web: webOn && providers.find((p) => p.id === provider)?.webSearch });
+            onSend={(q, preset) => {
+              void send(q, quote, attachments, { mode: checkMode ? "check" : undefined, web: webOn && providers.find((p) => p.id === provider)?.webSearch, preset });
               setWebOn(false);
             }}
             web={webOn}
@@ -1381,7 +1238,7 @@ export default function App() {
           onAsk={askAboutSelection}
           onAction={(prompt) => {
             const q = takeSelection();
-            if (q) void send(prompt, q);
+            if (q) void send(prompt, q, [], { preset: true });
           }}
           onCheck={() => {
             setCheckMode(true);
@@ -1392,7 +1249,7 @@ export default function App() {
             return open && panelTab === "notes" && showChat && noteOwners.some((o) => sameOwner(o, open.owner)) ? open.name : null;
           })()}
           onHighlight={doc?.hasText ? (c) => void highlightSelection(c) : null}
-          lastColor={hlColor}
+          lastColor={hl.color}
           onAddToNote={(anchor) => {
             const q = takeSelection();
             const from = doc && docs.find((d) => d.id === doc.id);
@@ -1402,29 +1259,29 @@ export default function App() {
         />
       )}
 
-      {hlMenu &&
+      {hl.menu &&
         doc &&
         (() => {
-          const h = highlights.find((x) => x.id === hlMenu.id);
+          const h = highlights.find((x) => x.id === hl.menu!.id);
           if (!h) return null;
           return (
             <HighlightMenu
               key={h.id}
               h={h}
-              anchor={hlMenu}
-              onClose={() => setHlMenu(null)}
-              onColor={(color) => void changeHighlight(h.id, { color })}
-              onComment={(comment) => void changeHighlight(h.id, { comment })}
-              onDelete={() => void removeHighlight(h.id)}
+              anchor={hl.menu}
+              onClose={() => hl.setMenu(null)}
+              onColor={(color) => void hl.change(h.id, { color })}
+              onComment={(comment) => void hl.change(h.id, { comment })}
+              onDelete={() => void hl.remove(h.id)}
               onAsk={() => {
-                setHlMenu(null);
+                hl.setMenu(null);
                 setQuote({ text: h.text, page: h.page, doc: doc.id });
                 setShowChat(true);
                 setPanelTab("chat");
                 requestAnimationFrame(() => chatRef.current?.focus());
               }}
               onAddToNote={(anchor) => {
-                setHlMenu(null);
+                hl.setMenu(null);
                 toNote(anchor, "Quote this highlight in…", (owner) => highlightBlock(h, owner));
               }}
             />
