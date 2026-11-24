@@ -24,6 +24,8 @@ export type AgentResult = {
   error: string | null;
   /** The model that actually answered (full id), if the CLI reports it. */
   model?: string | null;
+  /** The effort it answered with, where that can differ from the one asked for. */
+  effort?: string | null;
   /** The session to resume no longer exists: nothing was answered, ask again in a new session. */
   resumeFailed?: boolean;
 };
@@ -47,12 +49,23 @@ export type RunOptions = {
   onEvent: (e: AgentEvent) => void;
 };
 
-/** `id` is what we pass to --model; `detail` the full model id it stands for. */
-export type Model = { id: string; label: string; detail?: string };
+/** `id` is what run() gets; `detail` the full model id it stands for (internal, people see `label`). */
+export type Model = {
+  id: string;
+  label: string;
+  detail?: string;
+  /** One line about it, in words. */
+  description?: string;
+  /** Reasoning effort levels it can be asked for, and the one it uses otherwise (if known). */
+  efforts?: string[];
+  defaultEffort?: string | null;
+};
 
 export interface Provider {
   id: ProviderId;
+  /** What people call the assistant, and the program behind it. */
   label: string;
+  cli: string;
   /** Sessions saved under another tag (e.g. started with other tools) are not resumed. */
   sessionTag?: string;
   run(opts: RunOptions): Promise<AgentResult>;
@@ -61,7 +74,7 @@ export interface Provider {
   defaultModel(): Promise<Model | null>;
   /** Human-readable name for a model id. */
   describeModel(id: string): Promise<string>;
-  /** Selectable reasoning effort levels (empty: not supported). */
+  /** Every reasoning effort level it knows (a model may have fewer, see Model.efforts). */
   efforts: string[];
   /**
    * Web search with the user's approval per query (see RunOptions.web). Unset: not possible
@@ -69,8 +82,8 @@ export interface Provider {
    */
   webSearch?: boolean;
   webSearchNote?: string;
-  /** Effort the CLI uses when none is chosen (from its settings), if known. */
-  defaultEffort(): Promise<string | null>;
+  /** Effort used for this model (null: the default one) when none is chosen, if known. */
+  defaultEffort(model: string | null): Promise<string | null>;
   available(): Promise<boolean>;
 }
 
@@ -176,11 +189,15 @@ export function runQuick(
   });
 }
 
-/** Cache `fn` for `ms` milliseconds. */
-export function cached<T>(ms: number, fn: () => Promise<T>): () => Promise<T> {
+/** Cache `fn` for `ms` milliseconds; a result that isn't worth keeping (`keep`) is asked for again. */
+export function cached<T>(ms: number, fn: () => Promise<T>, keep: (value: T) => boolean = () => true): () => Promise<T> {
   let entry: { at: number; value: Promise<T> } | null = null;
   return () => {
-    if (!entry || Date.now() - entry.at > ms) entry = { at: Date.now(), value: fn() };
+    if (!entry || Date.now() - entry.at > ms) {
+      const e = (entry = { at: Date.now(), value: fn() });
+      const drop = () => void (entry === e && (entry = null));
+      e.value.then((v) => keep(v) || drop(), drop);
+    }
     return entry.value;
   };
 }

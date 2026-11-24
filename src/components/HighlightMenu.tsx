@@ -1,8 +1,10 @@
 import clsx from "clsx";
 import { NotebookPen, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { usePageLabels } from "../hooks/usePageLabels";
 import { HL_COLORS, type Highlight, type HlColor } from "../lib/api";
 import { HL_STYLE } from "../lib/highlightColors";
+import { pageLabel } from "../lib/pageLabels";
 import type { Anchor } from "./NotePicker";
 
 /** What you can do with a highlight you clicked: colour, comment, ask, note, delete. */
@@ -26,6 +28,7 @@ export function HighlightMenu({
   onClose: () => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
+  const label = pageLabel(usePageLabels().cite(), h.page);
   const [pos, setPos] = useState(anchor);
   const [comment, setComment] = useState(h.comment ?? "");
   const [confirm, setConfirm] = useState(false);
@@ -76,7 +79,7 @@ export function HighlightMenu({
             style={{ backgroundColor: HL_STYLE[c].dot }}
           />
         ))}
-        <span className="ml-auto text-[11px] text-zinc-400">p. {h.page}</span>
+        <span className="ml-auto text-[11px] text-zinc-400">p. {label}</span>
       </div>
       <textarea
         value={comment}

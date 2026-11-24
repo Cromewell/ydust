@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPrompt, scopeSignature, type DocRef, type Scope } from "../server/prompt.ts";
+import { buildPrompt, pageSignature, scopeSignature, type DocRef, type Scope } from "../server/prompt.ts";
 import type { Message } from "../server/store.ts";
 
 // Fixed fake paths: the prompt only passes them through, and snapshots must match on every OS.
@@ -172,5 +172,33 @@ describe("answer language and level", () => {
   it("follows the document for the app's built-in English prompts", () => {
     expect(buildPrompt({ scope, question: "Explain", firstTurn: false, preset: true })).toContain("Answer language: the language of the document (");
     expect(buildPrompt({ scope, question: "Explain", firstTurn: false, preset: true, language: "de" })).toContain("Answer language: German");
+  });
+});
+
+describe("printed page numbers", () => {
+  const book = doc("d1", "Book", { pages: 4, pageLabels: ["C1", "I", "1", "2"] });
+  const scope: Scope = { kind: "doc", doc: book, folder: null };
+
+  it("tells both numberings on the first turn, and only where they differ", () => {
+    const out = buildPrompt({ scope, question: "q", firstTurn: true, tools: true });
+    expect(out).toContain(`[d1] "Book": PDF p. 1 = C1, 2 = I, 3–4 = 1–2`);
+    expect(out).toContain("that is the printed number");
+    expect(buildPrompt({ scope: inFolder, question: "q", firstTurn: true, tools: true })).not.toContain("printed");
+  });
+
+  it("tells a resumed session once they change", () => {
+    expect(buildPrompt({ scope, question: "q", firstTurn: false, tools: true, pagesChanged: true })).toContain("PDF p. 1 = C1");
+    expect(buildPrompt({ scope, question: "q", firstTurn: false, tools: true })).not.toContain("printed");
+    expect(buildPrompt({ scope: alone, question: "q", firstTurn: false, pagesChanged: true })).toContain("all page numbers are the PDF's");
+    expect(pageSignature(alone)).toBe("");
+    expect(pageSignature(scope)).not.toBe("");
+  });
+
+  it("names both for a selected passage", () => {
+    const quote = { text: "Limits", page: 3 };
+    expect(buildPrompt({ scope, question: "q", quote, firstTurn: false })).toContain("on page 3 (printed 1):");
+    expect(buildPrompt({ scope: alone, question: "q", quote, firstTurn: false })).toContain("on page 3:");
+    const all: Scope = { kind: "folder", name: "F", docs: [script, book] };
+    expect(buildPrompt({ scope: all, question: "q", quote, quoteDoc: book, firstTurn: false })).toContain(`on page 3 (printed 1) of [d1] "Book"`);
   });
 });

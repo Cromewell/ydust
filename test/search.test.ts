@@ -181,3 +181,17 @@ describe("MCP server over stdio", () => {
     }
   });
 });
+
+describe("printed page numbers", () => {
+  it("are shown next to the PDF's, from the document's meta.json", async () => {
+    const book = await fixture("d20", "Book", ["Cover", "Gruppen und Ringe", "Ringe"]);
+    book.metaFile = path.join(dir, "d20.json");
+    await writeFile(book.metaFile, JSON.stringify({ pages: 3, pageLabels: ["1", "I", "II"] }));
+    const found = await search([book], { query: "Ringe" });
+    expect(found).toContain("p. 2 (printed I): ");
+    expect(found).toContain("p. 3 (printed II): ");
+    const read = await readPages([book], { from: 1, to: 2 });
+    expect(read).toContain(`"Book", page 1 ===`);
+    expect(read).toContain(`"Book", page 2 (printed I) ===`);
+  });
+});

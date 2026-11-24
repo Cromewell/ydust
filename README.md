@@ -37,8 +37,8 @@
 
 - **Check my understanding**: select a passage → *Check me*, then explain it in your own words. You get feedback, hints and a follow-up question, not the full solution.
 - **Explanation level**: Beginner, Student, Advanced or Exam prep.
-- **Second opinion**: under every answer, *Ask Claude* / *Ask Antigravity* asks the other assistant the same question and lets it check the first answer.
-- **Notes**: write your own Markdown notes next to the PDF, with formulas (`$x^2$`, `$$\int f$$`) and page links (`[p. 12](#page=12)`) that work in the preview. Every PDF and every folder has its own notes; they are plain `.md` files you can also open in any other editor. Notes save themselves as you type, and a note changed in another editor meanwhile is never overwritten without asking.
+- **Second opinion**: under every answer, *Ask Claude* / *Ask Gemini* asks the other assistant the same question and lets it check the first answer.
+- **Notes**: write your own Markdown notes next to the PDF, with formulas (`$x^2$`, `$$\int f$$`) and page links (`[p. 12](#page=12)`) that work in the preview (`#page=` counts the PDF's pages; links show the number printed on the page). Every PDF and every folder has its own notes; they are plain `.md` files you can also open in any other editor. Notes save themselves as you type, and a note changed in another editor meanwhile is never overwritten without asking.
 - **Add to note**: select a passage → *Notes* → *Add to note* quotes it with its page link (at the cursor, if a note is open). *Insert into note* under an answer adds the question, the passage and the answer.
 - **The tutor writes into your notes, you decide**: ask for exercises, a summary or a cheat sheet "into a note" (or select a passage → *Notes* → *Write exercises* / *Summarize to note*). The assistant picks a fitting note or a new name, and you get a diff under the answer, like in git: *Accept* writes it and opens the note, *Request changes* gets a second version (the first stays one click away), *Discard* leaves no trace. Nothing is written without your click, and a note you changed meanwhile is never overwritten: the diff is shown again against your new text.
 - **Review / Challenge your notes**: in the note editor, *Review* sends the note (or the lines you selected) to the assistant you have chosen. *Review* checks it against the documents: what is wrong, imprecise or missing, each finding with the page and a link to the line of your note (`L12`, click it to jump there). *Propose fixes* under a review drafts the corrections, which you accept as a diff like any draft. *Challenge me* asks 3 to 5 probing questions instead, without answers; *Answer these* lets you reply in *Check me* mode. A folder's note is reviewed in the folder chat.
@@ -64,8 +64,8 @@
 
 **Your choice of assistant**
 
-- **Antigravity or Claude**, switchable at any time; the other assistant gets the conversation so far. Every answer shows who wrote it and (on hover) the exact model.
-- **Model picker** with real model names, and the reasoning effort for Claude (`low` … `max`, or your Claude default).
+- **Gemini or Claude**, switchable at any time; the other assistant gets the conversation so far. Every answer shows who wrote it and (on hover) the model and effort.
+- **Model picker** with real model names, and a slider for the reasoning effort of the chosen model (or your CLI's default).
 - **Answer language** of your choice, or the language of your question.
 
 ## Requirements
@@ -115,7 +115,7 @@ The tests use [Vitest](https://vitest.dev) and need no AI CLI: they cover the fo
 ## Getting started
 
 1. **Add a PDF**: click *Add PDF* or drag files into the window. ydust reads the text of every page in the background (shown as *Reading pages…*). Keep the tab open until it's done.
-2. **Pick an assistant** at the top of the chat (Antigravity or Claude) and, if you like, a model.
+2. **Pick an assistant** at the top of the chat (Gemini or Claude) and, if you like, a model.
 3. **Select a passage** in the PDF and choose *Explain*, *Summarize*, *Quiz me*, *Check me*, or *Ask* to type your own question (`Ctrl+K` does the same).
 4. **Or just ask** about the whole document in the chat, e.g. "Give me an overview of this document."
 5. **Click page citations** in answers to jump there. **Pin** good answers (Pinned tab), or put them into a note.
@@ -149,7 +149,7 @@ To find the right places quickly, ydust gives the tutor a map of every document 
 ## Privacy and security
 
 - **Your files stay on your computer.** PDFs, extracted text, chats and notes are stored in your library folder: `~/.local/share/ydust` on Linux, `~/Library/Application Support/ydust` on macOS, `%APPDATA%\ydust` on Windows (or `YDUST_LIBRARY`). Only you can read it.
-- **But the AI runs in the cloud.** What you ask, and the parts of your documents the assistant reads, are sent to the provider of the CLI you use (Google for Antigravity, Anthropic for Claude), under your account and their terms. Don't use ydust for documents you may not share with them.
+- **But the AI runs in the cloud.** What you ask, and the parts of your documents the assistant reads, are sent to the provider of the CLI you use (Google for Gemini, Anthropic for Claude), under your account and their terms. Don't use ydust for documents you may not share with them.
 - **The assistant reads your documents and notes.** It can read the PDF's text (and, in a folder, the folder's other documents) and the chat's notes, nothing else on your computer. It cannot run commands or open web pages.
 - **It can propose note drafts; nothing is saved until you accept the diff.** Its only way to write is ydust's `write_note` tool, which stores a draft for you to review. The CLIs' own write and command tools stay off.
 - **It searches the web only when you switch it on, and only with queries you approve.** The globe turns web search on for one question. Each query is shown to you first and only runs after your click (possibly edited); no answer within 5 minutes, or stopping the answer, counts as no. Approved queries go to the search provider of the CLI (Anthropic's web search for Claude). Pages themselves are never opened (`WebFetch` stays off).
@@ -176,7 +176,7 @@ Set these environment variables before starting, e.g. `PORT=9000 npm start` (Lin
 | `AGY_BIN` | `agy` | Path to the Antigravity CLI |
 | `CLAUDE_BIN` | `claude` | Path to the Claude Code CLI |
 | `AGY_SETTINGS` | `~/.gemini/antigravity-cli/settings.json` | Where ydust reads Antigravity's default model |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Where ydust reads Claude's default effort |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Where ydust reads the effort saved per Claude model |
 
 Your preferences in the app (assistant, model, language, level, page colours, …) are remembered in the browser.
 
@@ -189,7 +189,7 @@ Your preferences in the app (assistant, model, language, level, page colours, �
 - **"Your library is still inside the app's folder"**: ydust 0.1 kept its data in `./library`. It still uses it while it is there, but a `git clean` could delete it, and Claude Code, started inside the repository, reads its CLAUDE.md and git status. Stop ydust and move the folder, e.g. `mv library ~/.local/share/ydust` (Linux), then start ydust again.
 - **"Not signed in"**: `YDUST_AUTH=1` is set. Open the sign-in link ydust printed in its terminal when it started.
 - **Port already in use**: start with another port, e.g. `PORT=8790 npm start` (see [Configuration](#configuration) for Windows).
-- **Antigravity seems to forget an older chat once**: after updating ydust, Antigravity chats from older versions start a new session once (the chat so far is handed over as context). That's expected.
+- **Gemini seems to forget an older chat once**: after updating ydust, Gemini chats from older versions start a new session once (the chat so far is handed over as context). That's expected.
 
 ## How it works
 
@@ -203,16 +203,16 @@ browser (React + pdf.js)  ──POST /api/…/ask──▶  Hono server (Node)  
 - **Each question** runs one headless turn of the selected CLI in the chat's folder (`<library>/<doc-id>/`, or `<library>/folders/<folder-id>/` for a folder chat). The other documents of the folder are added read-only with `--add-dir`. Sessions are resumed per CLI (`agy --conversation`, `claude --resume`); a chat runs one question at a time. If a session is gone (e.g. after reinstalling the CLI), the question is asked again at once in a new session, with the rules and the chat so far; other errors, like a usage limit, keep the session.
 - **The tutor rules** are also part of the CLI's system prompt (Claude Code's `--append-system-prompt-file` where available, Antigravity's agent file), so they outlast the compaction of long conversations.
 - **ydust's tools**: for every question ydust starts a tiny MCP server (`server/mcp/search.ts`, stdio, no dependencies) limited to the chat's documents and notes. `search(query, doc?)` uses the same forgiving matching as the in-app search and returns pages with excerpts (falling back to pages that contain all words); `read_pages(doc?, from, to?)` returns the exact text of up to 10 pages; `list_highlights(doc?, color?)` lists the user's highlights with their comments (these three only when a document has text). `list_notes()` and `read_note(name)` read the chat's notes. Claude Code gets the server via `--mcp-config` (only its tools pre-approved), Antigravity via `.agents/mcp_config.json` in the chat's folder (approved as `mcp(ydust/<tool>)`).
-- **Web search**: with the globe on, Claude Code gets `WebSearch` in `--tools` but not in `--allowedTools`, plus `--permission-prompt-tool mcp__ydust__approve`. So before each search it calls ydust's `approve` tool with the query, which allows nothing but a `WebSearch` and asks ydust: `POST /api/internal/approvals` (turn token as for drafts) waits while the browser shows the pop-up, and the user's click (`POST /api/…/approvals/:id`, optionally with an edited query) answers it with `{"behavior":"allow","updatedInput":{…}}` or `{"behavior":"deny","message":…}`. No answer in 5 minutes (Claude Code waits longer than that), or a stopped answer, is a denial. A resumed session accepts the changed tool set, so web questions continue the same conversation. Antigravity has no globe: headless `agy` can't ask for approval per action, and its `search_web` can't be limited by permission rules (`agy acp` could ask, but isn't used).
+- **Web search**: with the globe on, Claude Code gets `WebSearch` in `--tools` but not in `--allowedTools`, plus `--permission-prompt-tool mcp__ydust__approve`. So before each search it calls ydust's `approve` tool with the query, which allows nothing but a `WebSearch` and asks ydust: `POST /api/internal/approvals` (turn token as for drafts) waits while the browser shows the pop-up, and the user's click (`POST /api/…/approvals/:id`, optionally with an edited query) answers it with `{"behavior":"allow","updatedInput":{…}}` or `{"behavior":"deny","message":…}`. No answer in 5 minutes (Claude Code waits longer than that), or a stopped answer, is a denial. A resumed session accepts the changed tool set, so web questions continue the same conversation. Gemini has no globe: headless `agy` can't ask for approval per action, and its `search_web` can't be limited by permission rules (`agy acp` could ask, but isn't used).
 - **Drafts**: `write_note(name, content, mode, summary)` (mode `create`, `append` or `replace`) never touches the note. The MCP server posts the draft to `POST /api/internal/drafts` with the answer's turn token (32 random bytes, valid only while that answer runs; requests from a browser, which carry `Origin` or `Sec-Fetch-Site`, are refused). ydust stores it as `notes/.drafts/<id>.json` with a hash of the note it was made against, streams it to the browser, and records it on the answer. Accepting checks that the note is still the version the diff was shown against (otherwise the card shows the new diff), writes it atomically and removes the draft. *Request changes* is a normal question that carries the draft; the next `write_note` for that note becomes version 2. At most 20 drafts per chat (200 kB each) are kept; *New chat* removes open drafts, never notes.
 - **Prompts and settings never go on the command line**: the prompt goes in on stdin, and JSON (settings, MCP config) as files in the chat's `.agents/` folder. That avoids command-line length limits and, on Windows, quoting problems with `.cmd` shims. CLIs are started with [cross-spawn](https://github.com/moxystudio/node-cross-spawn) (finds `.exe` / `.cmd` via `PATHEXT`), and stopping an answer ends the whole process tree (`taskkill /T` on Windows).
-- **The prompt** contains the selected passage, the full text of that page, paths of attached pictures, the answer language and level, and your question. The first turn adds the tutor rules (cite pages as `[p. N](#page=N)`, …) and, in a folder, the list of documents with short ids (`d7`), text files and outlines. Other documents are cited as `[Name, p. N](#doc=d7&page=N)`. When a folder changes, the next turn tells the assistant what is in it now.
+- **The prompt** contains the selected passage, the full text of that page, paths of attached pictures, the answer language and level, and your question. The first turn adds the tutor rules (cite pages as `[p. N](#page=N)`, …) and, in a folder, the list of documents with short ids (`d7`), text files and outlines. Other documents are cited as `[Name, p. N](#doc=d7&page=N)`. `N` is always the PDF's page; where a PDF carries its own page labels (a book's "XII", "233"), ydust shows those everywhere and tells the assistant both numberings. When a folder changes, the next turn tells the assistant what is in it now.
 - **Switching assistants**: the other assistant gets the messages it hasn't seen yet as context.
-- **Review / Challenge** is a normal question with `mode: "review-note"` or `"challenge-note"` and the note's name (and lines). ydust saves the editor first, reads the note itself and puts it into the prompt with line numbers (up to 30,000 characters; for longer notes the assistant is told to read the rest with `read_note`). The assistant is asked to verify claims with `search`/`read_pages`, cite pages, link note lines as `[L12](#note-line=12)` and not rewrite the note. *Propose fixes* (`mode: "fix-note"`) asks for a `write_note` replace draft. The chat shows a chip (*Review of summary.md*) instead of the prompt; *Ask Claude* / *Ask Antigravity* reviews the same note again for a second opinion.
+- **Review / Challenge** is a normal question with `mode: "review-note"` or `"challenge-note"` and the note's name (and lines). ydust saves the editor first, reads the note itself and puts it into the prompt with line numbers (up to 30,000 characters; for longer notes the assistant is told to read the rest with `read_note`). The assistant is asked to verify claims with `search`/`read_pages`, cite pages, link note lines as `[L12](#note-line=12)` and not rewrite the note. *Propose fixes* (`mode: "fix-note"`) asks for a `write_note` replace draft. The chat shows a chip (*Review of summary.md*) instead of the prompt; *Ask Claude* / *Ask Gemini* reviews the same note again for a second opinion.
 - **Highlights** live in `highlights.json` next to the PDF (not in `meta.json`, so marking and chatting never write the same file). Each one is anchored by page and text plus which occurrence of that text on the page, and found again with the same forgiving matching as search, so it survives zooming, dark pages and a new text extraction. Bars are drawn under the text with multiply; on dark and tinted pages stronger colours keep each hue recognisable.
 - **Notes** are files in the chat's `notes/` folder, edited with CodeMirror and previewed with the same renderer as answers. Names are checked on the server (letters, digits, space, `.`, `_`, `-`, ending in `.md`, no paths, no names Windows reserves) and links aren't followed; a note is at most 1 MB, a chat has at most 200. Each save sends a hash of the version it started from: if the file changed in between (another tab, another editor), the server refuses with the current content and the editor asks which version to keep.
 
-**Antigravity** is started like this:
+**Gemini** (the Antigravity CLI) is started like this:
 
 ```
 agy --print= --input-format stream-json --output-format stream-json --disable-slash-commands \
@@ -220,6 +220,8 @@ agy --print= --input-format stream-json --output-format stream-json --disable-sl
     [--add-dir <other doc folder> …] [--conversation <id>] [--model <model>]
     # stdin: {"event":"user","message":{"content":"<prompt>"}}
 ```
+
+`agy models` lists every effort as a model of its own (`gemini-4-hydrogen-high`); ydust shows each model once and puts the id together from model and effort.
 
 `agy-settings.json` contains the permissions:
 
@@ -240,10 +242,10 @@ claude --print --output-format stream-json --verbose --include-partial-messages 
     --strict-mcp-config [--mcp-config .agents/claude-mcp.json] \
     --allowedTools mcp__ydust__search mcp__ydust__read_pages mcp__ydust__list_highlights mcp__ydust__list_notes mcp__ydust__read_note mcp__ydust__write_note \
     [--append-system-prompt-file .agents/claude-system.md] \
-    [--add-dir <other doc folder> …] [--resume <session-id>] [--model opus|sonnet|haiku] [--effort <level>]
+    [--add-dir <other doc folder> …] [--resume <session-id>] [--model <model>] [--effort <level>]
 ```
 
-Older Claude Code versions call the permission mode `default` and lack `--append-system-prompt-file`; ydust checks once by starting `claude` without input, which stops before any request. Claude Code has no "list models" command: the aliases (`opus`, `sonnet`, `haiku`, `fable`) show their real model names once an answer has used them (Claude Code names the model in its first output line; ydust remembers it in `claude-models.json`).
+Older Claude Code versions call the permission mode `default` and lack `--append-system-prompt-file`; ydust checks once by starting `claude` without input, which stops before any request. The model list, with names and effort levels, and the default model come from Claude Code itself: ydust sends the control requests `initialize` and `get_settings` (stream-json, no prompt, so nothing is answered). Of each family only the newest model is shown. If a version doesn't answer them, ydust offers the aliases (`opus`, `sonnet`, `haiku`, `fable`), which show their version once an answer has used them (remembered in `claude-models.json`).
 
 **Data layout** (in the library folder):
 

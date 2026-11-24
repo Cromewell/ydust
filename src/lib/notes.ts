@@ -1,5 +1,6 @@
 import { api, NoteConflict, type NoteOwner } from "./api";
 import { appendBlock } from "./noteText";
+import { pageLabel } from "./pageLabels";
 
 export { appendBlock, blockInsertion } from "./noteText";
 
@@ -20,10 +21,11 @@ export const noteEditor = {
 
 export const sameOwner = (a: NoteOwner, b: NoteOwner) => a.kind === b.kind && a.id === b.id;
 
-/** A page link that works in that owner's notes: bare in the document's own notes, with its id anywhere else. */
-export function pageLink(owner: NoteOwner, page: number, doc: { id: string; alias?: string; name: string }) {
-  if ((owner.kind === "doc" && owner.id === doc.id) || !doc.alias) return `[p. ${page}](#page=${page})`;
-  return `[${doc.name.replace(/[[\]]/g, "")}, p. ${page}](#doc=${doc.alias}&page=${page})`;
+/** A page link (showing the printed page number) that works in that owner's notes: bare in the document's own notes, with its id anywhere else. */
+export function pageLink(owner: NoteOwner, page: number, doc: { id: string; alias?: string; name: string; pageLabels?: string[] }) {
+  const p = pageLabel(doc.pageLabels, page);
+  if ((owner.kind === "doc" && owner.id === doc.id) || !doc.alias) return `[p. ${p}](#page=${page})`;
+  return `[${doc.name.replace(/[[\]]/g, "")}, p. ${p}](#doc=${doc.alias}&page=${page})`;
 }
 
 /** A selected passage as a Markdown quote, with its page link. */

@@ -1,10 +1,12 @@
 import clsx from "clsx";
 import { Download, FileText, Folder, Loader2, NotebookPen, Pencil, Plus, Trash2, X } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { usePageLabels } from "../hooks/usePageLabels";
 import { api, type NoteInfo, type NoteOwner } from "../lib/api";
 import { downloadText, noteFilesMarkdown, safeFilename } from "../lib/export";
 import { toNoteName } from "../lib/noteNames";
 import { sameOwner } from "../lib/notes";
+import { relabelCitations } from "../lib/pageLabels";
 import type { TextSize } from "../lib/settings";
 
 // CodeMirror is big: load it with the first note you open.
@@ -44,6 +46,7 @@ export function NotesPanel({
   textSize: TextSize;
   onReview: (owner: NoteOwner, name: string, mode: "review-note" | "challenge-note", lines?: [number, number]) => void;
 }) {
+  const labels = usePageLabels();
   const [lists, setLists] = useState<Record<string, NoteInfo[] | "error">>({});
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((t) => t + 1), []);
@@ -100,7 +103,12 @@ export function NotesPanel({
         return { owner, notes };
       }),
     );
-    downloadText(`${safeFilename(owners[0]?.name ?? "ydust")} - notes.md`, noteFilesMarkdown(groups));
+    downloadText(
+      `${safeFilename(owners[0]?.name ?? "ydust")} - notes.md`,
+      noteFilesMarkdown(groups, (md, owner) =>
+        relabelCitations(md, (alias, text) => (alias ? labels.cite(alias, text) : owner.kind === "doc" ? labels.doc(owner.id) : undefined)),
+      ),
+    );
   };
   const total = owners.reduce((n, o) => n + (Array.isArray(lists[keyOf(o)]) ? (lists[keyOf(o)] as NoteInfo[]).length : 0), 0);
 

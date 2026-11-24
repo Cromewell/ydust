@@ -98,12 +98,14 @@ export type ChatData = {
   sessionTags?: Record<string, string>;
   /** Per provider: signature of the folder context that session was last told about. */
   contextSigs?: Record<string, string>;
+  /** Per provider: the printed page numbers (pageSignature) that session was last told about. */
+  pageSigs?: Record<string, string>;
   /** Per provider: version of ydust's document tools that session was told about. */
   toolsVersion?: Record<string, number>;
 };
 
 /** A chat's messages and CLI sessions, in chat.json next to meta.json / folder.json. */
-export const CHAT_KEYS = ["messages", "conversations", "sessionTags", "contextSigs", "toolsVersion"] as const;
+export const CHAT_KEYS = ["messages", "conversations", "sessionTags", "contextSigs", "pageSigs", "toolsVersion"] as const;
 
 export type DocMeta = {
   id: string;
@@ -114,6 +116,8 @@ export type DocMeta = {
   pages: number | null;
   /** null = text not extracted yet, false = PDF has (almost) no text layer, e.g. a scan */
   hasText: boolean | null;
+  /** Page numbers as the document prints them (index 0 = PDF page 1), if they differ from the PDF's. */
+  pageLabels?: string[];
   /** Version of the client's text extraction that produced document.txt (re-extract when outdated). */
   textVersion?: number;
   lastPage: number;
@@ -163,7 +167,7 @@ export const chatDir = (kind: ChatKind, id: string) => (kind === "doc" ? docDir(
 export const pdfPath = (id: string) => path.join(docDir(id), "document.pdf");
 export const textPath = (id: string) => path.join(docDir(id), "document.txt");
 export const outlinePath = (id: string) => path.join(docDir(id), "outline.txt");
-const metaPath = (id: string) => path.join(docDir(id), "meta.json");
+export const metaPath = (id: string) => path.join(docDir(id), "meta.json");
 const folderMetaPath = (id: string) => path.join(folderDir(id), "folder.json");
 const chatPath = (kind: ChatKind, id: string) => path.join(chatDir(kind, id), "chat.json");
 
@@ -263,6 +267,7 @@ function legacyChat(raw: Legacy): ChatData {
     conversations: raw.conversations ?? (raw.conversationId ? { agy: raw.conversationId } : {}),
     ...(raw.sessionTags ? { sessionTags: raw.sessionTags } : {}),
     ...(raw.contextSigs ? { contextSigs: raw.contextSigs } : {}),
+    ...(raw.pageSigs ? { pageSigs: raw.pageSigs } : {}),
     ...(raw.toolsVersion ? { toolsVersion: raw.toolsVersion } : {}),
   };
 }

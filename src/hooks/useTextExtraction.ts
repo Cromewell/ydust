@@ -28,8 +28,8 @@ export function useTextExtraction(docs: DocSummary[], activeId: string | null, o
       try {
         const p = loaded ?? (await task!.promise);
         setProgress((x) => ({ ...x, [id]: { done: 0, total: p.numPages } }));
-        const { pages, outline } = await extractAllText(p, (n, total) => setProgress((x) => ({ ...x, [id]: { done: n, total } })));
-        done.current(await api.putText(id, pages, TEXT_VERSION, outline));
+        const { pages, outline, labels } = await extractAllText(p, (n, total) => setProgress((x) => ({ ...x, [id]: { done: n, total } })));
+        done.current(await api.putText(id, pages, TEXT_VERSION, outline, labels));
       } catch {
         // An open document's PDF is destroyed when you switch away: retried in the background.
         if (!loaded) failed.current.add(id);

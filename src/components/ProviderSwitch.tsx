@@ -35,7 +35,7 @@ export function ProviderSwitch({
             aria-label={p.label}
             title={
               !p.available
-                ? `${p.label} CLI not found on this computer`
+                ? `${p.label} needs ${p.cli}, which was not found on this computer`
                 : disabled
                   ? "Wait until the current answer is finished"
                   : `Ask ${p.label}`

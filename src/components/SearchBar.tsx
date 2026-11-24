@@ -1,6 +1,8 @@
 import clsx from "clsx";
 import { ChevronDown, ChevronUp, List, Loader2, Search, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { usePageLabels } from "../hooks/usePageLabels";
+import { pageLabel } from "../lib/pageLabels";
 
 export type SearchHit = { page: number; n: number; before: string; match: string; after: string };
 
@@ -28,6 +30,7 @@ export function SearchBar({
 }) {
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLUListElement>(null);
+  const labels = usePageLabels().cite();
   const [showList, setShowList] = useState(false);
 
   useEffect(() => {
@@ -104,7 +107,7 @@ export function SearchBar({
                   i === current ? "bg-orange-50 dark:bg-orange-500/10" : "hover:bg-zinc-100 dark:hover:bg-zinc-800",
                 )}
               >
-                <span className="w-9 shrink-0 pt-px text-right font-medium text-zinc-400 tabular-nums">p. {h.page}</span>
+                <span className="w-9 shrink-0 pt-px text-right font-medium text-zinc-400 tabular-nums">p. {pageLabel(labels, h.page)}</span>
                 <span className="min-w-0 flex-1 text-zinc-600 dark:text-zinc-400">
                   {h.before}
                   <mark className="rounded-sm bg-yellow-200 px-0.5 text-zinc-900">{h.match}</mark>

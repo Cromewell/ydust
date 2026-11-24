@@ -5,6 +5,8 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { usePageLabels } from "../hooks/usePageLabels";
+import { relabelText } from "../lib/pageLabels";
 import { SIZE_CLASSES, type TextSize } from "../lib/settings";
 
 /** Plain text of a rendered link label. */
@@ -52,6 +54,7 @@ export const Markdown = memo(function Markdown({
   onNoteLine?: (line: number) => void;
   size?: TextSize;
 }) {
+  const labels = usePageLabels();
   const components: Components = {
     // Never load pictures: the address of one could carry text out of a note or an answer
     // (e.g. a model asked to write "![](https://site/?q=<your notes>)"). They stay a label.
@@ -80,13 +83,17 @@ export const Markdown = memo(function Markdown({
       const link = href?.match(/^#(?:doc=([\w-]+)&)?page=(\d+)$/);
       if (link && (!link[1] || hasDoc?.(link[1]))) {
         const [, doc, page] = link;
+        const text = textOf(children);
+        // Answers name the PDF's page; show the number printed on it.
+        const plain = typeof children === "string" || (Array.isArray(children) && children.every((x) => typeof x === "string"));
+        const shown = plain ? relabelText(text, Number(page), labels.cite(doc, text)) : children;
         return (
           <button
             type="button"
-            onClick={() => onJump(Number(page), doc, textOf(children))}
+            onClick={() => onJump(Number(page), doc, text)}
             className="mx-0.5 inline-flex items-center rounded-md bg-violet-100 px-1.5 py-px align-baseline text-[0.85em] font-medium text-violet-700 no-underline transition hover:bg-violet-200 dark:bg-violet-500/15 dark:text-violet-300 dark:hover:bg-violet-500/25"
           >
-            {children}
+            {shown}
           </button>
         );
       }

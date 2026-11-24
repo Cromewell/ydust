@@ -116,12 +116,13 @@ export async function loadOutline(pdf: PDFDocumentProxy): Promise<OutlineNode[]>
 }
 
 /** Bump when extraction changes, so existing documents get re-extracted on open. */
-export const TEXT_VERSION = 3;
+export const TEXT_VERSION = 4;
 
 /**
  * Text of every page (for document.txt), plus an outline for the agent (outline.txt):
  * the PDF's bookmarks if it has any, else one heading per page (repeats collapsed).
  * Lines look like "p. 12: 2.1 Fourier series", nested entries indented.
+ * `labels`: the page numbers as printed, if the PDF has them (see lib/pageLabels).
  */
 export async function extractAllText(pdf: PDFDocumentProxy, onProgress?: (done: number, total: number) => void) {
   const pages: string[] = [];
@@ -154,7 +155,8 @@ export async function extractAllText(pdf: PDFDocumentProxy, onProgress?: (done: 
       .filter(Boolean)
       .join("\n");
   }
-  return { pages, outline };
+  const labels = await pdf.getPageLabels().catch(() => null);
+  return { pages, outline, labels };
 }
 
 /** Turn a raw text-layer selection into readable text (join hyphenated line breaks, collapse whitespace). */

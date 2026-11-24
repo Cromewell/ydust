@@ -1,6 +1,8 @@
 import clsx from "clsx";
 import { ChevronRight, ListTree, Loader2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePageLabels } from "../hooks/usePageLabels";
+import { pageLabel } from "../lib/pageLabels";
 import { loadOutline, type OutlineNode as Node, type PDFDocumentProxy } from "../lib/pdf";
 
 export function OutlinePanel({
@@ -17,6 +19,7 @@ export function OutlinePanel({
   /** Replaces the default header (e.g. Contents | Highlights tabs). */
   header?: React.ReactNode;
 }) {
+  const labels = usePageLabels().cite();
   const [nodes, setNodes] = useState<Node[] | null>(null);
   const [open, setOpen] = useState<Set<string>>(new Set());
   const activeRef = useRef<HTMLButtonElement>(null);
@@ -99,7 +102,7 @@ export function OutlinePanel({
               )}
             >
               <span className="min-w-0 flex-1">{node.title}</span>
-              {node.page != null && <span className="shrink-0 text-[11px] text-zinc-400 tabular-nums">{node.page}</span>}
+              {node.page != null && <span className="shrink-0 text-[11px] text-zinc-400 tabular-nums">{pageLabel(labels, node.page)}</span>}
             </button>
           </div>
           {expanded && node.children.length > 0 && <ul>{render(node.children, depth + 1)}</ul>}
