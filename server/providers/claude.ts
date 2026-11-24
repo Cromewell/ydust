@@ -2,10 +2,13 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { MCP_NAME } from "../mcp/launch.ts";
+import { newestPerFamily } from "../../src/lib/claudeModels.ts";
 import { SYSTEM_RULES } from "../prompt.ts";
 import { LIBRARY_DIR, writeAtomic } from "../store.ts";
 import { cached, cliFile, runLines, runQuick, writeFileIfChanged, type AgentResult, type Model, type Provider, type RunOptions } from "./types.ts";
 
+/** --effort levels. */
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 
 /**
@@ -179,9 +182,9 @@ async function run(opts: RunOptions): Promise<AgentResult> {
   return { sessionId, response: response.trim() ? response : finalText, status: "SUCCESS", denied, error: null, model };
 }
 
-/** "claude-opus-5-5" → "Claude Opus 5.5" (dates like -20250101 are dropped). */
+/** "claude-opus-5-5" → "Claude Opus 5.5" (dates like -20250101 and a "[1m]" are dropped). */
 export function prettyClaude(id: string) {
-  const parts = id.split("-").filter((p) => !/^\d{8}$/.test(p));
+  const parts = id.replace(/\[\w+\]$/, "").split("-").filter((p) => !/^\d{8}$/.test(p));
   const words: string[] = [];
   let version: string[] = [];
   for (const p of parts) {
@@ -195,13 +198,13 @@ export function prettyClaude(id: string) {
   return words.join(" ");
 }
 
-// Claude Code accepts aliases that always point at the latest model of each family. It has no
-// "list models" command: the full id behind an alias is learned from the answers (their init
-// event names the model) and remembered, so the picker can show real names.
+// Claude Code accepts aliases that always point at the latest model of each family. If it can't
+// list its models (see `info`), the full id behind an alias is learned from the answers (their
+// init event names the model) and remembered, so the picker can show real names.
 const ALIASES = ["opus", "sonnet", "haiku", "fable"];
 const LEARNED_FILE = path.join(LIBRARY_DIR, "claude-models.json");
 let learned: Promise<Record<string, string>> | null = null;
-const learnedModels = () => (learned ??= readFile(LEARNED_FILE, "utf8").then((t) => JSON.parse(t) as Record<string, string>, () => ({}) as Record<string, string>));
+const learnedModels = () => (learned ??= readFile(LEARNED_FILE, "utf8").then((t) => JSON.parse(t) as Record<string, string>).catch(() => ({}) as Record<string, string>));
 
 /** `alias` ("" = the default) answered with `id`. */
 async function remember(alias: string, id: string) {
@@ -211,23 +214,84 @@ async function remember(alias: string, id: string) {
   await writeAtomic(LEARNED_FILE, JSON.stringify(all, null, 2)).catch(() => {});
 }
 
+/** What Claude Code says about itself: its models, and what a session without any choice would use. */
+export type ClaudeInfo = { models: Model[]; model: string | null; effort: string | null };
+
+/** The answers to PROBE, one JSON per line. */
+export function parseClaudeInfo(lines: string[]): ClaudeInfo {
+  const info: ClaudeInfo = { models: [], model: null, effort: null };
+  for (const line of lines) {
+    let r: any;
+    try {
+      r = JSON.parse(line)?.response?.response;
+    } catch {
+      continue;
+    }
+    if (Array.isArray(r?.models)) {
+      info.models = r.models
+        // "default" is the account's recommendation: ydust shows the user's own default instead.
+        .filter((m: any) => typeof m?.value === "string" && m.value !== "default")
+        .map((m: any): Model => {
+          const full = typeof m.resolvedModel === "string" ? m.resolvedModel : null;
+          // "Opus 5.5 · Best for everyday, complex tasks": the name is in the label already.
+          const description = typeof m.description === "string" ? m.description.split(" · ").slice(1).join(" · ") : "";
+          return {
+            id: m.value,
+            label: full ? prettyClaude(full) : String(m.displayName ?? m.value),
+            detail: full ?? m.value,
+            description: description || undefined,
+            efforts: Array.isArray(m.supportedEffortLevels) ? EFFORTS.filter((e) => m.supportedEffortLevels.includes(e)) : [],
+          };
+        });
+    }
+    if (r?.applied) {
+      if (typeof r.applied.model === "string") info.model = r.applied.model;
+      if (EFFORTS.includes(r.applied.effort)) info.effort = r.applied.effort;
+    }
+  }
+  // Either way it may name its own model ("claude-fable-5-1[1m]"): the full id, as in the list.
+  info.model = info.models.find((m) => m.detail === info.model || m.id === info.model)?.detail ?? info.model;
+  return info;
+}
+
+/** Control requests of the stream-json protocol: no prompt, so nothing is answered or billed. */
+const PROBE = ["initialize", "get_settings"].map((subtype) => JSON.stringify({ type: "control_request", request_id: subtype, request: { subtype } }) + "\n").join("");
+const info = cached(
+  10 * 60_000,
+  async (): Promise<ClaudeInfo> => {
+    const lines: string[] = [];
+    const args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--tools", "", "--strict-mcp-config", "--no-session-persistence"];
+    // Older versions don't know these requests: then the aliases below have to do.
+    await runLines(CLAUDE_BIN, args, { cwd: tmpdir(), env: cleanEnv(), stdin: PROBE, signal: AbortSignal.timeout(10_000), label: "Claude CLI" }, (l) => void lines.push(l)).catch(() => {});
+    return parseClaudeInfo(lines);
+  },
+  (i) => i.models.length > 0,
+);
+
 const models = async (): Promise<Model[]> => {
+  const { models } = await info();
+  if (models.length) return Promise.all(newestPerFamily(models).map(async (m) => ({ ...m, defaultEffort: await defaultEffort(m.id) })));
   const known = await learnedModels();
   return ALIASES.map((alias) => ({
     id: alias,
-    label: known[alias] ? prettyClaude(known[alias]) : `${alias.charAt(0).toUpperCase()}${alias.slice(1)} (latest)`,
+    label: known[alias] ? prettyClaude(known[alias]) : `Claude ${alias.charAt(0).toUpperCase()}${alias.slice(1)}`,
     detail: known[alias] ?? alias,
+    efforts: EFFORTS,
   }));
 };
 
 async function defaultModel(): Promise<Model | null> {
-  const id = (await learnedModels())[""];
-  return id ? { id: "", label: prettyClaude(id), detail: id } : null;
+  const { models, model, effort } = await info();
+  const id = model ?? (await learnedModels())[""];
+  if (!id) return null;
+  const listed = models.find((m) => m.detail === id);
+  return { id: "", label: prettyClaude(id), detail: id, description: listed?.description, efforts: listed?.efforts ?? EFFORTS, defaultEffort: effort ?? (await defaultEffort(id)) };
 }
 
 async function describeModel(id: string) {
-  // Aliases stand for the full id last seen; full ids are prettified directly.
-  return prettyClaude((await learnedModels())[id] ?? id);
+  // Aliases stand for the full id they resolve to; full ids are prettified directly.
+  const { models } = await info();
+  return prettyClaude(models.find((m) => m.id === id)?.detail ?? (await learnedModels())[id] ?? id);
 }
 
 /**
@@ -252,13 +316,19 @@ const features = cached(10 * 60_000, async () => {
 
 const available = cached(60_000, async () => (await runQuick(CLAUDE_BIN, ["--version"], { timeout: 10_000, env: cleanEnv() })).ok);
 
-const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-
-/** Claude Code's default effort is the "effortLevel" in its user settings. */
-async function defaultEffort(): Promise<string | null> {
+/**
+ * The effort used when none is chosen: for the default model Claude Code says it itself; for
+ * another one, only an effort saved for that model in its settings is certain.
+ */
+async function defaultEffort(model: string | null): Promise<string | null> {
+  const i = await info();
+  const id = model ? (i.models.find((m) => m.id === model)?.detail ?? model) : i.model;
+  if (i.effort && id === i.model) return i.effort;
   try {
     const dir = process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude");
-    const level = JSON.parse(await readFile(path.join(dir, "settings.json"), "utf8")).effortLevel;
+    const settings = JSON.parse(await readFile(path.join(dir, "settings.json"), "utf8"));
+    // A Claude Code that doesn't answer `info` is an older one, with a single setting.
+    const level = (id && settings.modelSettings?.[id]?.effortLevel) ?? (i.models.length ? null : settings.effortLevel);
     return typeof level === "string" && EFFORTS.includes(level) ? level : null;
   } catch {
     return null;
@@ -268,6 +338,7 @@ async function defaultEffort(): Promise<string | null> {
 export const claude: Provider = {
   id: "claude",
   label: "Claude",
+  cli: "Claude Code (claude)",
   run,
   models,
   defaultModel,

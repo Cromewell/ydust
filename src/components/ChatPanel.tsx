@@ -22,8 +22,11 @@ import {
   X,
 } from "lucide-react";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { usePageLabels } from "../hooks/usePageLabels";
 import { api, type Chat, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote, type ToolEvent } from "../lib/api";
-import { chatMarkdown, downloadText, notesMarkdown, questionOf, safeFilename } from "../lib/export";
+import { chatMarkdown, downloadText, notesMarkdown, questionOf, safeFilename, type PageNames } from "../lib/export";
+import { effortLabel } from "../lib/effort";
+import { pageLabel, relabelCitations } from "../lib/pageLabels";
 import { SIZE_CLASSES, type TextSize } from "../lib/settings";
 import { ChatSettings } from "./ChatSettings";
 import { DraftCard } from "./DraftCard";
@@ -173,6 +176,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
     tab,
     onTab: setTab,
   } = props;
+  const labels = usePageLabels();
   const [input, setInput] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
@@ -239,10 +243,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
   const pinnedCount = chat.messages.filter((m) => m.pinned).length;
   const isFolder = chat.kind === "folder";
   const prep = isFolder ? resolveBarePages : keep;
+  // In a folder chat, a page link that names no document (even by context) stays as it is.
+  const relabel = (md: string) => relabelCitations(prep(md), (alias, text) => (alias || !isFolder ? labels.cite(alias, text) : undefined));
   const label = (id?: string) => providers.find((p) => p.id === (id ?? "agy"))?.label;
 
   const exportCurrent = () => {
-    const md = tab === "pinned" ? notesMarkdown(chat, providers, docName) : chatMarkdown(chat, providers, docName);
+    const pages: PageNames = { text: relabel, label: (q) => pageLabel(labels.doc(q.doc), q.page) };
+    const md = tab === "pinned" ? notesMarkdown(chat, providers, docName, pages) : chatMarkdown(chat, providers, docName, pages);
     downloadText(`${safeFilename(chat.name)} - ${tab === "pinned" ? "pinned" : "chat"}.md`, md);
   };
 
@@ -368,7 +375,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
         className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
       >
         {tab === "pinned" ? (
-          <PinnedView {...props} label={label} onPreview={setPreview} prep={prep} />
+          <PinnedView {...props} label={label} onPreview={setPreview} prep={prep} relabel={relabel} />
         ) : (
           <>
             {!isFolder && chat.hasText === false && (
@@ -412,6 +419,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
                     key={m.id}
                     {...props}
                     prep={prep}
+                    relabel={relabel}
                     m={m}
                     next={chat.messages[i + 1]}
                     flashing={flashId === m.id}
@@ -452,7 +460,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, Props>(function ChatPanel(p
               <QuoteIcon className="mt-0.5 size-3.5 shrink-0 text-violet-500" />
               <p className="line-clamp-3 flex-1 text-xs text-zinc-600 dark:text-zinc-400">
                 <button onClick={() => onJumpQuote(quote)} className="mr-1 font-semibold text-violet-600 dark:text-violet-400">
-                  {isFolder && quote.doc && docName(quote.doc) ? `${docName(quote.doc)}, ` : ""}p. {quote.page}
+                  {isFolder && quote.doc && docName(quote.doc) ? `${docName(quote.doc)}, ` : ""}p. {pageLabel(labels.doc(quote.doc), quote.page)}
                 </button>
                 {quote.text}
               </p>
@@ -616,10 +624,13 @@ type ViewProps = Props & {
   onPreview: (url: string) => void;
   /** Prepares an answer's Markdown for display (see resolveBarePages). */
   prep: (md: string) => string;
+  /** The same for text that leaves ydust: page links show the printed page numbers. */
+  relabel: (md: string) => string;
 };
 
 function QuoteChip({ q, size, onJumpQuote, docName }: { q: Quote; size: TextSize; onJumpQuote: Props["onJumpQuote"]; docName: Props["docName"] }) {
   const from = q.doc ? docName(q.doc) : undefined;
+  const labels = usePageLabels();
   return (
     <button
       onClick={() => onJumpQuote(q)}
@@ -630,7 +641,7 @@ function QuoteChip({ q, size, onJumpQuote, docName }: { q: Quote; size: TextSize
       )}
     >
       <span className="mr-1 font-semibold text-violet-600 dark:text-violet-400">
-        {from ? `${from}, ` : ""}p. {q.page}
+        {from ? `${from}, ` : ""}p. {pageLabel(labels.doc(q.doc), q.page)}
       </span>
       <span className="line-clamp-3">{q.text}</span>
     </button>
@@ -640,7 +651,7 @@ function QuoteChip({ q, size, onJumpQuote, docName }: { q: Quote; size: TextSize
 function MessageView(
   props: ViewProps & { m: Message; next?: Message; flashing: boolean; busy: boolean },
 ) {
-  const { m, next, flashing, textSize: size, chat, providers, busy, label, onJump, hasDoc, docName, onJumpQuote, onPreview, onPin, onSecondOpinion, prep, onCheckMode } = props;
+  const { m, next, flashing, textSize: size, chat, providers, busy, label, onJump, hasDoc, docName, onJumpQuote, onPreview, onPin, onSecondOpinion, prep, relabel, onCheckMode } = props;
 
   if (m.role === "user") {
     if (m.secondOpinionOf) {
@@ -775,7 +786,7 @@ function MessageView(
           {m.pinned ? <PinOff className="size-3" /> : <Pin className="size-3" />}
           {m.pinned ? "Pinned" : "Pin"}
         </button>
-        <CopyButton text={m.content} />
+        <CopyButton text={() => relabel(m.content)} />
         <InsertButton onClick={(at) => props.onInsertAnswer(m.id, at)} />
         {other && !busy && (
           <button
@@ -962,8 +973,7 @@ function ProviderTag({
         {model || modelLabel ? (
           <>
             <span className="block font-semibold">{modelLabel ?? model}</span>
-            {model && model !== modelLabel && <span className="block font-mono text-[10px] opacity-70">{model}</span>}
-            {effort && <span className="mt-0.5 block text-[10px] opacity-80">Effort: {effort}</span>}
+            {effort && <span className="mt-0.5 block text-[10px] opacity-80">Effort: {effortLabel(effort)}</span>}
           </>
         ) : (
           <span className="opacity-80">Model not recorded (answered before ydust stored it)</span>
@@ -974,7 +984,7 @@ function ProviderTag({
 }
 
 function toolLabel(t: ToolEvent) {
-  // ydust's own tools: "ydust/search" (Antigravity) or "mcp__ydust__search" (Claude).
+  // ydust's own tools: "ydust/search" (agy) or "mcp__ydust__search" (Claude).
   const own = t.name.match(/^(?:ydust\/|mcp__ydust__)(\w+)$/)?.[1];
   if (own === "search") return t.detail ? `Searching for “${t.detail}”…` : "Searching the documents…";
   if (own === "read_pages") return t.detail ? `Reading ${t.detail}…` : "Reading pages…";
@@ -1047,12 +1057,12 @@ function InsertButton({ onClick, compact }: { onClick: (at: Anchor) => void; com
   );
 }
 
-function CopyButton({ text }: { text: string }) {
+function CopyButton({ text }: { text: () => string }) {
   const [done, setDone] = useState(false);
   return (
     <button
       onClick={() => {
-        void navigator.clipboard.writeText(text).then(() => {
+        void navigator.clipboard.writeText(text()).then(() => {
           setDone(true);
           setTimeout(() => setDone(false), 1200);
         });

@@ -29,11 +29,15 @@ import { Sidebar } from "./components/Sidebar";
 import { api, ask, type Approval, type AskMode, type Chat, type Highlight, type HlColor, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
 import { downloadText, highlightsMarkdown, questionOf, safeFilename } from "./lib/export";
 import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
+import { nearestPage, pageLabel, relabelCitations, type PageLabels } from "./lib/pageLabels";
+import { splitEffort } from "./lib/effort";
+import { choose } from "./lib/models";
 import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
 import type { TextSize } from "./lib/settings";
 import { loadPdf, renderRegion, type PageRect, type PDFDocumentProxy } from "./lib/pdf";
 import { store } from "./lib/storage";
 import { useChatWidth } from "./hooks/useChatWidth";
+import { PageLabelContext, type PageLabelLookup } from "./hooks/usePageLabels";
 import { useDocSearch } from "./hooks/useDocSearch";
 import { useHighlights } from "./hooks/useHighlights";
 import { needsText, useTextExtraction } from "./hooks/useTextExtraction";
@@ -46,6 +50,12 @@ const byName = (a: FolderSummary, b: FolderSummary) => a.name.localeCompare(b.na
 
 const isTyping = (t: EventTarget | null) =>
   t instanceof HTMLElement && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName));
+
+/** The remembered Gemini model and effort (older versions kept them in one id: "gemini-…-high"). */
+function agyChoice() {
+  const [model, old] = splitEffort(store.get("model:agy") ?? store.get("model") ?? "");
+  return { model, effort: store.get("effort:agy") ?? old ?? "" };
+}
 
 export default function App() {
   const [docs, setDocs] = useState<DocSummary[]>([]);
@@ -83,13 +93,13 @@ export default function App() {
   const [provider, setProvider] = useState(() => store.get("provider") ?? "agy");
   // One remembered model per CLI ("model" was the agy model before Claude was added).
   const [models, setModels] = useState<Record<string, string>>(() => ({
-    agy: store.get("model:agy") ?? store.get("model") ?? "",
+    agy: agyChoice().model,
     claude: store.get("model:claude") ?? "",
   }));
   const model = models[provider] ?? "";
   // Reasoning effort per CLI ("" = the CLI's own default).
-  const [efforts, setEfforts] = useState<Record<string, string>>(() => ({ claude: store.get("effort:claude") ?? "" }));
-  const effort = providers.find((p) => p.id === provider)?.efforts.includes(efforts[provider] ?? "") ? efforts[provider] : "";
+  const [efforts, setEfforts] = useState<Record<string, string>>(() => ({ agy: agyChoice().effort, claude: store.get("effort:claude") ?? "" }));
+  const effort = efforts[provider] ?? "";
   const [language, setLanguage] = useState(() => store.get("lang") ?? "auto");
   const [level, setLevel] = useState(() => store.get("level") ?? "auto");
   const [checkMode, setCheckMode] = useState(false);
@@ -362,14 +372,14 @@ export default function App() {
     [activeId, docs, jumpTo, flash],
   );
   /**
-   * A page link in an answer: "#page=N" (the open PDF) or "#doc=<alias>&page=N".
+   * The document of a page link in an answer: "#page=N" (the open PDF) or "#doc=<alias>&page=N".
    * Models sometimes mix up the short ids ("d1"/"d2") but name the document right in the
    * link text ("[Script, p. 3]"): if the text names another document, trust the text.
    */
-  const onCite = useCallback(
-    (p: number, alias?: string, label?: string) => {
+  const citeTarget = useCallback(
+    (alias?: string, label?: string) => {
       let target = alias ? docs.find((d) => d.alias === alias) : undefined;
-      const said = label?.replace(/(?:[,;(]\s*|\s+)(?:pp?|s|page|seite)\.?\s*\d.*$/i, "").trim().toLowerCase();
+      const said = label?.replace(/(?:[,;(]\s*|\s+)(?:pp?|s|page|seite)\.?\s*(?:\d|[ivxlcdm]+\b|[a-z]-?\d).*$/i, "").trim().toLowerCase();
       if (alias && said && said.length >= 3) {
         const names = (d: DocSummary) => d.name.toLowerCase();
         const fits = (d: DocSummary) => names(d).startsWith(said) || said.startsWith(names(d));
@@ -379,11 +389,26 @@ export default function App() {
           if (named.length === 1) target = named[0];
         }
       }
+      return target;
+    },
+    [docs, chat],
+  );
+  const onCite = useCallback(
+    (p: number, alias?: string, label?: string) => {
+      const target = citeTarget(alias, label);
       if (target) openAt(target.id, p);
       else jumpTo(p);
     },
-    [docs, chat, openAt, jumpTo],
+    [citeTarget, openAt, jumpTo],
   );
+  /** Printed page numbers, for wherever pages are shown. */
+  const pageLabels = useMemo<PageLabelLookup>(() => {
+    const of = (id: string | null | undefined) => docs.find((d) => d.id === id)?.pageLabels;
+    return {
+      cite: (alias, label) => of(citeTarget(alias, label)?.id ?? activeId),
+      doc: (id) => of(id ?? (chat?.kind === "doc" ? chat.id : activeId)),
+    };
+  }, [docs, chat, activeId, citeTarget]);
   const hasDoc = useCallback((alias: string) => docs.some((d) => d.alias === alias), [docs]);
   const docName = useCallback((id: string) => docs.find((d) => d.id === id)?.name, [docs]);
 
@@ -523,14 +548,15 @@ export default function App() {
         pending = "";
         if (text) setStreaming((s) => (s ? { ...s, text: s.text + text } : s));
       };
+      const choice = choose(providers.find((p) => p.id === via), models[via] ?? "", efforts[via] ?? "");
       try {
         await ask(
           t,
           {
             question,
             quote: withQuote ?? undefined,
-            model: models[via] || undefined,
-            effort: efforts[via] || undefined,
+            model: choice.id || undefined,
+            effort: choice.effort || undefined,
             provider: via,
             images: imageIds,
             language: language === "auto" ? undefined : language,
@@ -583,7 +609,7 @@ export default function App() {
       // what the server saved, with its ids, once it is done, instead of a copy only the browser knows.
       if (!finished && partial.trim()) void reloadChat(t);
     },
-    [target, models, efforts, provider, language, level, flash, setAttachments, setPanelTab], // eslint-disable-line react-hooks/exhaustive-deps
+    [target, models, efforts, providers, provider, language, level, flash, setAttachments, setPanelTab], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   /** Set the status of drafts on the answers of that chat (if it is still on screen). */
@@ -615,12 +641,14 @@ export default function App() {
         if (heading) parts.push(`### ${q?.mode === "check" ? "My explanation: " : ""}${heading}`);
         const quoteDoc = q?.quote ? docs.find((d) => d.id === (q!.quote!.doc ?? chat.id)) : undefined;
         if (q?.quote && quoteDoc) parts.push(quoteForNote(q.quote.text, pageLink(owner, q.quote.page, quoteDoc)));
-        parts.push(citationsFor(a.content.trim(), from, owner));
+        // A link without a document means this document's chat's own; in a folder's chat it stays as it is.
+        const labels = (alias?: string, text?: string) => (alias || from.kind === "doc" ? pageLabels.cite(alias ?? from.alias, text) : undefined);
+        parts.push(citationsFor(relabelCitations(a.content.trim(), labels), from, owner));
         return parts.join("\n\n");
       };
       setPicker({ anchor, title: "Insert this answer into…", block });
     },
-    [chat, docs],
+    [chat, docs, pageLabels],
   );
 
   /** One of the chat's notes, in the Notes tab (at a line). */
@@ -807,13 +835,13 @@ export default function App() {
       setSnipping(false);
       try {
         const blob = await renderRegion(pdf, pageNum, rect);
-        const a = addAttachment(blob, `p. ${pageNum}`);
+        const a = addAttachment(blob, `p. ${pageLabel(pageLabels.cite(), pageNum)}`);
         if (a) setSnipped(a);
       } catch (e) {
         flash(`Snapshot failed: ${(e as Error).message}`);
       }
     },
-    [pdf, addAttachment, flash],
+    [pdf, addAttachment, flash, pageLabels],
   );
 
   // Paste pictures from the clipboard straight into the chat.
@@ -902,6 +930,7 @@ export default function App() {
   }, [upload]);
 
   return (
+    <PageLabelContext value={pageLabels}>
     <div
       className={clsx(
         "flex h-dvh overflow-hidden bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100",
@@ -954,7 +983,7 @@ export default function App() {
           )}
           {pdf && (
             <>
-              <PageInput page={page} total={pdf.numPages} onGo={jumpTo} />
+              <PageInput page={page} total={pdf.numPages} labels={pageLabels.cite()} onGo={jumpTo} />
               <div className="mx-1 h-5 w-px bg-zinc-200 dark:bg-zinc-800" />
               <button onClick={() => zoomBy(-1)} className="icon-btn" title="Zoom out">
                 <Minus className="size-4" />
@@ -1035,7 +1064,7 @@ export default function App() {
                   highlights={highlights}
                   header={header}
                   onOpen={(h) => openAt(doc.id, h.page, h.text)}
-                  onExport={(list) => downloadText(`${safeFilename(doc.name)} - highlights.md`, highlightsMarkdown(doc.name, list))}
+                  onExport={(list) => downloadText(`${safeFilename(doc.name)} - highlights.md`, highlightsMarkdown(doc.name, list, pageLabels.cite()))}
                   onCopyToNote={(list, anchor) =>
                     toNote(anchor, `Copy ${list.length} highlight${list.length === 1 ? "" : "s"} into…`, (owner) => list.map((h) => highlightBlock(h, owner)).join("\n\n"))
                   }
@@ -1330,30 +1359,36 @@ export default function App() {
         </div>
       )}
     </div>
+    </PageLabelContext>
   );
 }
 
-function PageInput({ page, total, onGo }: { page: number; total: number; onGo: (p: number) => void }) {
-  const [value, setValue] = useState(String(page));
-  useEffect(() => setValue(String(page)), [page]);
+/** The current page and where to go: with the printed page numbers, if the document has its own. */
+function PageInput({ page, total, labels, onGo }: { page: number; total: number; labels: PageLabels; onGo: (p: number) => void }) {
+  const label = pageLabel(labels, page);
+  const [value, setValue] = useState(label);
+  useEffect(() => setValue(label), [label, page]);
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        const n = Math.min(total, Math.max(1, Number(value) || 1));
+        const n = labels ? (nearestPage(labels, value, page) ?? page) : Math.min(total, Math.max(1, Number(value) || 1));
         onGo(n);
-        setValue(String(n));
+        setValue(pageLabel(labels, n));
       }}
       className="flex items-center gap-1 text-xs text-zinc-500"
     >
       <input
         value={value}
-        onChange={(e) => setValue(e.target.value.replace(/\D/g, ""))}
+        onChange={(e) => setValue(labels ? e.target.value : e.target.value.replace(/\D/g, ""))}
         onFocus={(e) => e.target.select()}
+        title={labels ? "Page number as printed in the document" : undefined}
         className="w-9 rounded-md border border-zinc-200 bg-transparent py-0.5 text-center text-zinc-800 tabular-nums outline-none focus:border-violet-400 dark:border-zinc-800 dark:text-zinc-200"
         aria-label="Page"
       />
-      <span className="tabular-nums">/ {total}</span>
+      <span className="tabular-nums" title={labels ? `Page ${page} of the PDF's ${total}` : undefined}>
+        {labels ? `(${page} / ${total})` : `/ ${total}`}
+      </span>
     </form>
   );
 }
@@ -1371,7 +1406,7 @@ function EmptyState({ onPick }: { onPick: (files: File[]) => void }) {
         </div>
         <h1 className="text-lg font-semibold">Drop a PDF to start studying</h1>
         <p className="mt-1.5 max-w-sm text-sm text-zinc-500">
-          Select any passage and ask Antigravity or Claude about it: explanations, summaries, quizzes. No copy-pasting needed.
+          Select any passage and ask Gemini or Claude about it: explanations, summaries, quizzes. No copy-pasting needed.
         </p>
         <span className="mt-5 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white dark:bg-white dark:text-zinc-900">Choose files</span>
       </button>

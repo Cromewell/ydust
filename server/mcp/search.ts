@@ -14,7 +14,7 @@
  *                                  a WebSearch whose query the user approved in the app
  *
  * What it may touch comes from ydust, never from the model:
- *   YDUST_DOCS        JSON array of { alias, name, textFile } (the first is the default document)
+ *   YDUST_DOCS        JSON array of { alias, name, textFile, … } (the first is the default document)
  *   YDUST_NOTES_DIR   the chat's notes folder (read only)
  *   YDUST_API, YDUST_TURN_TOKEN   where to hand drafts and approvals to ydust, valid while this turn runs
  *   YDUST_NOTES_WRITE=0   this turn may not draft notes (a review)
@@ -24,10 +24,11 @@ import { readFile } from "node:fs/promises";
 import http from "node:http";
 import { createInterface } from "node:readline";
 import { findInString, fold } from "../../src/lib/textMatch.ts";
+import { cleanLabels, pageLabel, type PageLabels } from "../../src/lib/pageLabels.ts";
 import { readHighlightsFile } from "../highlights.ts";
 import { NoteError, listNotesIn, readNoteIn } from "../notes.ts";
 
-export type ScopeDoc = { alias: string; name: string; textFile: string; highlightsFile?: string };
+export type ScopeDoc = { alias: string; name: string; textFile: string; highlightsFile?: string; metaFile?: string };
 
 const MAX_PER_DOC = 8;
 const MAX_TOTAL = 30;
@@ -50,6 +51,18 @@ function pagesOf(d: ScopeDoc): Promise<string[]> {
     pageCache.set(d.alias, p);
   }
   return p;
+}
+
+/** " (printed 233)" for a PDF page that prints another number, else "". */
+async function printedOf(d: ScopeDoc): Promise<(page: number) => string> {
+  let labels: PageLabels;
+  try {
+    const meta = d.metaFile ? JSON.parse(await readFile(d.metaFile, "utf8")) : null;
+    labels = cleanLabels(meta?.pageLabels, meta?.pages);
+  } catch {
+    /* no labels */
+  }
+  return (page) => (pageLabel(labels, page) === String(page) ? "" : ` (printed ${pageLabel(labels, page)})`);
 }
 
 /** A document by alias ("d3", "[d3]") or by name; the first one if none is given. */
@@ -81,16 +94,17 @@ export async function search(docs: ScopeDoc[], args: { query?: unknown; doc?: un
     scope = [d];
   }
 
-  type Hit = { page: number; text: string };
+  type Hit = { page: string; text: string };
   const phrase: { doc: ScopeDoc; hits: Hit[]; count: number }[] = [];
   for (const d of scope) {
     const pages = await pagesOf(d);
+    const printed = await printedOf(d);
     const hits: Hit[] = [];
     let count = 0;
     pages.forEach((text, i) => {
       for (const [a, b] of findInString(text, query, 200)) {
         count++;
-        if (hits.length < MAX_PER_DOC) hits.push({ page: i + 1, text: excerpt(text, a, b) });
+        if (hits.length < MAX_PER_DOC) hits.push({ page: `${i + 1}${printed(i + 1)}`, text: excerpt(text, a, b) });
       }
     });
     if (count) phrase.push({ doc: d, hits, count });
@@ -120,10 +134,11 @@ export async function search(docs: ScopeDoc[], args: { query?: unknown; doc?: un
       const pages = await pagesOf(d);
       const found = pages.map((t, i) => ({ folded: fold(t), text: t, page: i + 1 })).filter((p) => words.every((w) => p.folded.includes(w)));
       if (!found.length) continue;
+      const printed = await printedOf(d);
       out.push("", `[${d.alias}] "${d.name}" (${found.length} page${found.length === 1 ? "" : "s"}):`);
       for (const p of found.slice(0, MAX_PER_DOC)) {
         const [a, b] = findInString(p.text, query.split(/\s+/)[0], 1)[0] ?? [0, 0];
-        out.push(`  p. ${p.page}: ${excerpt(p.text, a, b)}`);
+        out.push(`  p. ${p.page}${printed(p.page)}: ${excerpt(p.text, a, b)}`);
       }
       if (found.length > MAX_PER_DOC) out.push(`  … ${found.length - MAX_PER_DOC} more pages`);
     }
@@ -142,11 +157,12 @@ export async function readPages(docs: ScopeDoc[], args: { doc?: unknown; from?: 
   if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) return "`from` and `to` must be page numbers with 1 ≤ from ≤ to.";
   if (from > pages.length) return `[${d.alias}] "${d.name}" has only ${pages.length} pages.`;
   const last = Math.min(to, pages.length, from + MAX_PAGES_PER_READ - 1);
+  const printed = await printedOf(d);
   const out: string[] = [];
   let size = 0;
   let n = from;
   for (; n <= last; n++) {
-    const block = `=== [${d.alias}] "${d.name}", page ${n} ===\n${pages[n - 1] || "(no text on this page)"}`;
+    const block = `=== [${d.alias}] "${d.name}", page ${n}${printed(n)} ===\n${pages[n - 1] || "(no text on this page)"}`;
     if (out.length && size + block.length > MAX_READ_CHARS) break;
     out.push(block);
     size += block.length;
@@ -181,7 +197,8 @@ export async function listHighlightsTool(docs: ScopeDoc[], args: { doc?: unknown
     if (!shown.length) continue;
     total += shown.length;
     out.push("", `[${d.alias}] "${d.name}" (${shown.length}):`);
-    for (const h of shown) out.push(`  p. ${h.page} (${h.color}): «${oneLine(h.text).slice(0, 600)}»${h.comment ? ` — my comment: ${oneLine(h.comment)}` : ""}`);
+    const printed = await printedOf(d);
+    for (const h of shown) out.push(`  p. ${h.page}${printed(h.page)} (${h.color}): «${oneLine(h.text).slice(0, 600)}»${h.comment ? ` — my comment: ${oneLine(h.comment)}` : ""}`);
   }
   if (!total && out.length) return out.join("\n").trim();
   if (!total) return `No highlights${color ? ` in ${color}` : ""}${scope.length === 1 ? ` in [${scope[0].alias}] "${scope[0].name}"` : ""}.`;
@@ -211,7 +228,7 @@ const DOC_TOOLS = [
       type: "object",
       properties: {
         doc: { type: "string", description: "Document id, e.g. d3. Default: the document this chat is about (or the first one)." },
-        from: { type: "integer", description: "First page (1-based)." },
+        from: { type: "integer", description: "First page (1-based, the PDF's count of pages)." },
         to: { type: "integer", description: "Last page (inclusive). Default: same as from." },
       },
       required: ["from"],
@@ -459,7 +476,7 @@ function scopeFromEnv(): ScopeDoc[] {
   try {
     const raw = JSON.parse(process.env.YDUST_DOCS ?? "[]");
     return Array.isArray(raw)
-      ? raw.filter((d) => d && typeof d.alias === "string" && typeof d.name === "string" && typeof d.textFile === "string" && (d.highlightsFile === undefined || typeof d.highlightsFile === "string"))
+      ? raw.filter((d) => d && typeof d.alias === "string" && typeof d.name === "string" && typeof d.textFile === "string" && (d.highlightsFile === undefined || typeof d.highlightsFile === "string") && (d.metaFile === undefined || typeof d.metaFile === "string"))
       : [];
   } catch {
     return [];

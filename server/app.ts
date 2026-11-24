@@ -11,7 +11,7 @@ import { HighlightError, addHighlight, deleteHighlight, highlightsPath, listHigh
 import { acceptDraft, clearDrafts, createDraft, discardDraft, getDraft, listDrafts, type DraftInfo } from "./drafts.ts";
 import { ydustServer, type McpServer, type McpTool } from "./mcp/launch.ts";
 import { MAX_NOTE_BYTES, NoteError, deleteNote, listNotes, notesDir, readNote, renameNote, saveNote } from "./notes.ts";
-import { buildPrompt, scopeSignature, type DocRef, type Scope } from "./prompt.ts";
+import { buildPrompt, pageSignature, scopeSignature, type DocRef, type Scope } from "./prompt.ts";
 import {
   ASK_MODES,
   IMAGE_TYPES,
@@ -27,6 +27,7 @@ import {
   docDir,
   folderOfDoc,
   imagePath,
+  metaPath,
   isValidId,
   isValidImageId,
   listDocs,
@@ -58,6 +59,7 @@ import {
   type Quote,
 } from "./store.ts";
 import { noteNameProblem } from "../src/lib/noteNames.ts";
+import { cleanLabels, relabelCitations } from "../src/lib/pageLabels.ts";
 
 const MAX_UPLOAD = 200 * 1024 * 1024;
 const MAX_IMAGE = 20 * 1024 * 1024;
@@ -215,10 +217,10 @@ app.get("/api/providers", async (c) =>
     await Promise.all(
       Object.values(PROVIDERS).map(async (p) => {
         const available = await p.available();
-        const base = { id: p.id, label: p.label, available, efforts: p.efforts, webSearch: !!p.webSearch, webSearchNote: p.webSearchNote ?? null };
-        if (!available) return { ...base, models: [], defaultModel: null, defaultEffort: null };
-        const [models, defaultModel, defaultEffort] = await Promise.all([p.models(), p.defaultModel(), p.defaultEffort()]);
-        return { ...base, models, defaultModel, defaultEffort };
+        const base = { id: p.id, label: p.label, cli: p.cli, available, efforts: p.efforts, webSearch: !!p.webSearch, webSearchNote: p.webSearchNote ?? null };
+        if (!available) return { ...base, models: [], defaultModel: null };
+        const [models, defaultModel] = await Promise.all([p.models(), p.defaultModel()]);
+        return { ...base, models, defaultModel };
       }),
     ),
   ),
@@ -237,7 +239,11 @@ app.post("/api/internal/drafts", async (c) => {
   const target = typeof body.target === "string" ? body.target : "";
   const replaces = turn.latest.get(target) ?? (turn.revises?.target === target ? turn.revises.id : null);
   try {
-    const draft = await createDraft(turn.kind, turn.id, { ...body, target: body.target, provider: turn.provider, replaces } as Parameters<typeof createDraft>[2]);
+    // Notes are plain files: their links show the printed page numbers in any editor.
+    const scope = await loadScope(turn.kind, turn.id);
+    const labelsOf = (alias?: string) => (alias ? scope?.docs.find((d) => d.alias === alias) : turn.kind === "doc" ? scope?.docs[0] : undefined)?.pageLabels;
+    const content = typeof body.content === "string" ? relabelCitations(body.content, labelsOf) : body.content;
+    const draft = await createDraft(turn.kind, turn.id, { ...body, content, target: body.target, provider: turn.provider, replaces } as Parameters<typeof createDraft>[2]);
     const { content: _, ...meta } = draft;
     turn.drafts = [...turn.drafts.filter((d) => d.id !== draft.replaces), meta];
     turn.latest.set(draft.target, draft.id);
@@ -341,7 +347,7 @@ app.patch("/api/docs/:id", async (c) => {
 
 app.put("/api/docs/:id/text", limit(MAX_TEXT_BODY, "the extracted text is too large"), async (c) => {
   const id = c.req.param("id");
-  const { pages, version, outline } = await c.req.json<{ pages: string[]; version?: number; outline?: string }>();
+  const { pages, version, outline, labels } = await c.req.json<{ pages: string[]; version?: number; outline?: string; labels?: unknown }>();
   if (!Array.isArray(pages) || pages.some((p) => typeof p !== "string")) {
     return c.json({ error: "pages must be an array of strings" }, 400);
   }
@@ -352,6 +358,7 @@ app.put("/api/docs/:id/text", limit(MAX_TEXT_BODY, "the extracted text is too la
     m.pages = pages.length;
     m.hasText = chars >= Math.max(40, pages.length * 15);
     m.textVersion = Number.isInteger(version) ? version : 1;
+    m.pageLabels = cleanLabels(labels, pages.length);
   });
   return c.json(summarize(meta, (await folderOfDoc(id))?.id ?? null));
 });
@@ -444,6 +451,7 @@ async function docRef(meta: DocMeta, withOutline: boolean): Promise<DocRef> {
     name: meta.name,
     pages: meta.pages,
     hasText: meta.hasText,
+    pageLabels: meta.pageLabels,
     textFile: textPath(meta.id),
     outlineFile: outline?.trim() ? outlinePath(meta.id) : null,
     outline: withOutline ? outline : undefined,
@@ -489,6 +497,7 @@ function chatRoutes(kind: ChatKind, base: string) {
       m.conversations = {};
       delete m.sessionTags;
       delete m.contextSigs;
+      delete m.pageSigs;
       delete m.toolsVersion;
     });
     await clearImages(chatDir(kind, id));
@@ -702,6 +711,7 @@ type PreparedTurn = {
   sessionId: string | null;
   tag: string;
   signature: string;
+  pages: string;
   model: string | null;
   effort: string | null;
 };
@@ -800,8 +810,9 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
   const signature = scopeSignature(scope);
   // Sessions from before folders existed were told about this document only.
   const told = chat.contextSigs?.[providerId] ?? (scope.kind === "doc" ? scopeSignature({ ...scope, folder: null }) : "");
+  const pages = pageSignature(scope);
   // ydust's search/read_pages tools over the chat's documents (that have text); the first is the default.
-  const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile, highlightsFile: highlightsPath(d.id) }));
+  const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile, highlightsFile: highlightsPath(d.id), metaFile: metaPath(d.id) }));
   // …and the chat's notes; drafts come back here with this turn's token.
   // A review or challenge only reads: no write_note in that turn (fixes are asked for separately).
   const token = randomBytes(32).toString("hex");
@@ -837,6 +848,7 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
       language: typeof language === "string" ? language : undefined,
       firstTurn: !resumed,
       contextChanged: resumed && told !== signature,
+      pagesChanged: resumed && (chat.pageSigs?.[providerId] ?? "") !== pages,
       tools: searchable.length > 0,
       // The rules stay the same from turn to turn, even when one turn can't write.
       noteTools: runtime.apiBase ? "write" : "read",
@@ -888,7 +900,8 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
     sessionId,
     tag,
     signature,
-    model: typeof model === "string" && /^[\w.-]+$/.test(model) ? model : null,
+    pages,
+    model: typeof model === "string" && /^\w[\w.-]*(?:\[\w+\])?$/.test(model) ? model : null,
     effort: typeof effort === "string" && provider.efforts.includes(effort) ? effort : null,
   };
 }
@@ -949,7 +962,7 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
         provider: providerId,
         model: usedModel ?? undefined,
         modelLabel: usedModel ? await provider.describeModel(usedModel).catch(() => usedModel) : undefined,
-        effort: p.effort ?? (await provider.defaultEffort().catch(() => null)) ?? undefined,
+        effort: result.effort ?? p.effort ?? (await provider.defaultEffort(p.model).catch(() => null)) ?? undefined,
         drafts: turn.drafts.length ? turn.drafts.map(asMessageDraft) : undefined,
         webQueries: turn.webQueries.length ? turn.webQueries : undefined,
         newSession: restarted || undefined,
@@ -960,6 +973,7 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
           m.conversations[providerId] = result.sessionId;
           m.sessionTags = { ...m.sessionTags, [providerId]: p.tag };
           m.contextSigs = { ...m.contextSigs, [providerId]: p.signature };
+          m.pageSigs = { ...m.pageSigs, [providerId]: p.pages };
           m.toolsVersion = { ...m.toolsVersion, [providerId]: TOOLS_VERSION };
         } else if (restarted) {
           delete m.conversations[providerId]; // the next question starts a new session

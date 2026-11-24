@@ -74,6 +74,8 @@ export type DocSummary = {
   size: number;
   pages: number | null;
   hasText: boolean | null;
+  /** Page numbers as the document prints them (index 0 = PDF page 1), if they differ from the PDF's. */
+  pageLabels?: string[];
   textVersion?: number;
   lastPage: number;
   messageCount: number;
@@ -103,20 +105,21 @@ export type Chat = ChatTarget & { name: string; messages: Message[]; hasText: bo
 
 const chatBase = (t: ChatTarget) => (t.kind === "doc" ? `/api/docs/${t.id}` : `/api/folders/${t.id}`);
 
-/** `id` is what gets passed to --model; `detail` the full model id it stands for. */
-export type Model = { id: string; label: string; detail?: string };
+/** `id` is what is sent with a question; people see `label` and `description`. */
+export type Model = { id: string; label: string; description?: string; efforts?: string[]; defaultEffort?: string | null };
 
-/** A CLI that can answer: Antigravity (agy) or Claude Code (claude). */
+/** A CLI that can answer: Gemini (the Antigravity CLI, agy) or Claude Code (claude). */
 export type ProviderInfo = {
   id: string;
   label: string;
+  /** The program behind it. */
+  cli: string;
   available: boolean;
   models: Model[];
   /** What the CLI uses when no model is chosen. */
   defaultModel: Model | null;
-  /** Selectable reasoning efforts (empty if the CLI has none) and the configured default. */
+  /** Every reasoning effort it knows (a model may have fewer). */
   efforts: string[];
-  defaultEffort: string | null;
   /** Can search the web with an approval per query; if not, why (for a tooltip). */
   webSearch: boolean;
   webSearchNote: string | null;
@@ -171,8 +174,8 @@ export const api = {
   },
   patch: (id: string, body: { name?: string; lastPage?: number; folderId?: string | null }) =>
     fetch(`/api/docs/${id}`, send("PATCH", body)).then(json<DocSummary>),
-  putText: (id: string, pages: string[], version: number, outline: string) =>
-    fetch(`/api/docs/${id}/text`, send("PUT", { pages, version, outline })).then(json<DocSummary>),
+  putText: (id: string, pages: string[], version: number, outline: string, labels: string[] | null) =>
+    fetch(`/api/docs/${id}/text`, send("PUT", { pages, version, outline, labels })).then(json<DocSummary>),
   remove: (id: string) => fetch(`/api/docs/${id}`, send("DELETE")).then(json<{ ok: true }>),
   pages: (id: string) => fetch(`/api/docs/${id}/pages`).then(json<{ pages: string[] }>),
   providers: () => fetch("/api/providers").then(json<ProviderInfo[]>),

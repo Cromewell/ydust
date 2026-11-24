@@ -1,8 +1,10 @@
 import clsx from "clsx";
 import { Download, Highlighter, ListTree, NotebookPen, StickyNote, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { usePageLabels } from "../hooks/usePageLabels";
 import { HL_COLORS, type Highlight, type HlColor } from "../lib/api";
 import { HL_STYLE } from "../lib/highlightColors";
+import { pageLabel } from "../lib/pageLabels";
 import type { Anchor } from "./NotePicker";
 
 export type SideTab = "contents" | "highlights";
@@ -47,6 +49,7 @@ export function HighlightsPanel({
   onExport: (list: Highlight[]) => void;
   onCopyToNote: (list: Highlight[], at: Anchor) => void;
 }) {
+  const labels = usePageLabels().cite();
   const [filter, setFilter] = useState<Set<HlColor>>(new Set());
   const shown = useMemo(() => highlights.filter((h) => !filter.size || filter.has(h.color)), [highlights, filter]);
   const pages = useMemo(() => {
@@ -98,7 +101,7 @@ export function HighlightsPanel({
         ) : (
           pages.map(([page, list]) => (
             <section key={page} className="mb-2">
-              <h3 className="px-1.5 pt-1 pb-0.5 text-[11px] font-semibold text-zinc-400">Page {page}</h3>
+              <h3 className="px-1.5 pt-1 pb-0.5 text-[11px] font-semibold text-zinc-400">Page {pageLabel(labels, page)}</h3>
               <ul>
                 {list.map((h) => (
                   <li key={h.id}>

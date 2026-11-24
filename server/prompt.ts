@@ -1,3 +1,4 @@
+import { labelRanges, pageLabel } from "../src/lib/pageLabels.ts";
 import type { AskMode, Message, Quote } from "./store.ts";
 
 const MAX_QUOTE = 8_000;
@@ -61,6 +62,8 @@ export type DocRef = {
   name: string;
   pages: number | null;
   hasText: boolean | null;
+  /** Printed page numbers, where they differ from the PDF's (see src/lib/pageLabels). */
+  pageLabels?: string[];
   textFile: string;
   /** outline.txt, if the document has one. */
   outlineFile: string | null;
@@ -78,6 +81,24 @@ export function scopeSignature(scope: Scope) {
   const docs = scope.kind === "doc" ? (scope.folder?.others ?? []) : scope.docs;
   const name = scope.kind === "doc" ? (scope.folder?.name ?? "") : scope.name;
   return JSON.stringify([name, docs.map((d) => [d.alias, d.name, d.pages, d.hasText, !!d.outlineFile])]);
+}
+
+const docsOf = (scope: Scope) => (scope.kind === "doc" ? [scope.doc, ...(scope.folder?.others ?? [])] : scope.docs);
+/** The scope's documents that print other page numbers than the PDF's, with both numberings. */
+const printedPages = (scope: Scope) => docsOf(scope).flatMap((d) => (d.pageLabels ? [`[${d.alias}] "${d.name}": ${labelRanges(d.pageLabels)}`] : []));
+
+/** Changes whenever the printed page numbers the agent should know about change ("": there are none). */
+export const pageSignature = (scope: Scope) => printedPages(scope).join("\n");
+
+/** Two numberings: the agent always works with the PDF's; people talk about the printed ones. */
+function pagesRule(scope: Scope) {
+  const list = printedPages(scope);
+  return (
+    `- Page numbers in the tools, outlines, text files and links are PDF page numbers (counted from the first page of the file). These documents print other numbers on their pages (PDF = printed; the tools add "printed N"):\n` +
+    list.map((l) => `    - ${l}`).join("\n") +
+    `\n  When I name a page, or a text does (a table of contents, an index, a cross-reference), that is the printed number: convert it before you look it up. ` +
+    `In links, always write the PDF number in both places, like [p. N](#page=N): ydust shows me the printed number instead. So mention pages only as such links, never in plain text.`
+  );
 }
 
 function outlineExcerpt(d: DocRef) {
@@ -154,6 +175,8 @@ export function buildPrompt(opts: {
   firstTurn: boolean;
   /** The folder changed since this session last heard about it. */
   contextChanged?: boolean;
+  /** The documents' printed page numbers changed since then (e.g. they are known now). */
+  pagesChanged?: boolean;
   /** ydust's search/read_pages tools are available in this turn. */
   tools?: boolean;
   /** ydust's notes tools: reading only, or also proposing drafts (write_note). */
@@ -179,7 +202,7 @@ export function buildPrompt(opts: {
   /** The question is one of the app's built-in English prompts, so its language says nothing. */
   preset?: boolean;
 }) {
-  const { scope, question, quote, quoteDoc, pageText, images = [], language, firstTurn, contextChanged, tools, noteTools, toolsIntro, history = [], docNames, level, mode, otherAnswer, revision, note, web, preset } = opts;
+  const { scope, question, quote, quoteDoc, pageText, images = [], language, firstTurn, contextChanged, pagesChanged, tools, noteTools, toolsIntro, history = [], docNames, level, mode, otherAnswer, revision, note, web, preset } = opts;
   const parts: string[] = [];
   const isFolder = scope.kind === "folder";
 
@@ -229,6 +252,7 @@ export function buildPrompt(opts: {
         ? `- When you refer to a place in a document, cite it as a Markdown link of the exact form ${citeOther}.`
         : `- When you refer to a place in this PDF, cite it as a Markdown link of the exact form [p. N](#page=N).` +
           (scope.folder?.others.length ? ` For the other documents of the folder use ${citeOther}.` : ""),
+      ...(pageSignature(scope) ? [pagesRule(scope)] : []),
       `- Never link to local files or paths.`,
       `- Be clear and concise; prefer explanations, small examples and intuition over repeating the text.`,
       `- Reply in the answer language I name with each message.`,
@@ -249,6 +273,14 @@ export function buildPrompt(opts: {
         ? `Note: the documents in the folder changed since we last talked. ${ctx}\n` +
             (isFolder ? `Cite them as ${citeOther}.` : `Cite the other documents as ${citeOther}.`)
         : `Note: this PDF is no longer in a folder. Only use this PDF from now on.`,
+    );
+  }
+
+  if (!firstTurn && pagesChanged) {
+    parts.push(
+      pageSignature(scope)
+        ? `Note: the documents' page numbers. From now on:\n${pagesRule(scope)}`
+        : `Note: no document has its own printed page numbers any more: all page numbers are the PDF's.`,
     );
   }
 
@@ -274,7 +306,9 @@ export function buildPrompt(opts: {
 
   if (quote) {
     const where = isFolder && quoteDoc ? ` of [${quoteDoc.alias}] "${quoteDoc.name}"` : "";
-    parts.push(`I selected this passage on page ${quote.page}${where}:\n<selection>\n${clip(quote.text, MAX_QUOTE)}\n</selection>`);
+    const label = pageLabel((isFolder ? quoteDoc : scope.doc)?.pageLabels, quote.page);
+    const printed = label === String(quote.page) ? "" : ` (printed ${label})`;
+    parts.push(`I selected this passage on page ${quote.page}${printed}${where}:\n<selection>\n${clip(quote.text, MAX_QUOTE)}\n</selection>`);
     if (pageText) parts.push(`Full text of that page for context:\n<page n="${quote.page}">\n${clip(pageText, MAX_PAGE)}\n</page>`);
   }
 

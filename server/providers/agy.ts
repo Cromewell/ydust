@@ -2,6 +2,7 @@ import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { MCP_NAME, type McpServer } from "../mcp/launch.ts";
+import { EFFORTS, nearestEffort, splitEffort } from "../../src/lib/effort.ts";
 import { SYSTEM_RULES } from "../prompt.ts";
 import { cached, cliFile, runLines, runQuick, writeFileIfChanged, type AgentResult, type Model, type Provider, type RunOptions } from "./types.ts";
 
@@ -66,6 +67,7 @@ export function agySettings(opts: Pick<RunOptions, "cwd" | "readDirs" | "mcp" | 
 
 async function run(opts: RunOptions): Promise<AgentResult> {
   await prepareWorkspace(opts.cwd, opts.mcp);
+  const chosen = opts.model || opts.effort ? pickVariant(await variants(), opts.model ?? null, opts.effort ?? null, await defaultId()) : null;
   const settingsFile = cliFile(opts.cwd, "agy-settings.json");
   const readDirs = opts.readDirs ?? [];
   const settings = agySettings(opts);
@@ -86,7 +88,7 @@ async function run(opts: RunOptions): Promise<AgentResult> {
   ];
   for (const d of readDirs) args.push("--add-dir", d);
   if (opts.sessionId) args.push("--conversation", opts.sessionId);
-  if (opts.model) args.push("--model", opts.model);
+  if (chosen) args.push("--model", chosen);
 
   let sessionId = opts.sessionId ?? null;
   let response = "";
@@ -160,59 +162,126 @@ async function run(opts: RunOptions): Promise<AgentResult> {
   );
 
   // agy doesn't report the model; it's either the chosen one or its configured default.
-  const model = opts.model ?? (await defaultModel())?.detail ?? null;
+  const model = chosen ?? (await defaultId());
+  const effort = model ? splitEffort(model)[1] : null;
   if (resumeFailed && !opts.signal?.aborted) {
-    return { sessionId: null, response: "", status: "ERROR", denied, error: `conversation ${opts.sessionId} not found`, model, resumeFailed };
+    return { sessionId: null, response: "", status: "ERROR", denied, error: `conversation ${opts.sessionId} not found`, model, effort, resumeFailed };
   }
-  if (aborted) return { sessionId, response, status: "ABORTED", denied, error: null, model };
+  if (aborted) return { sessionId, response, status: "ABORTED", denied, error: null, model, effort };
   const diag = (stderr + extra).trim();
-  if (!gotResult && code !== 0) return { sessionId, response, status: "ERROR", denied, error: diag || `agy exited with code ${code}`, model };
-  return { sessionId, response, status, denied, error: response.trim() ? null : diag || null, model };
+  if (!gotResult && code !== 0) return { sessionId, response, status: "ERROR", denied, error: diag || `agy exited with code ${code}`, model, effort };
+  return { sessionId, response, status, denied, error: response.trim() ? null : diag || null, model, effort };
 }
 
-const models = cached(10 * 60_000, async (): Promise<Model[]> => {
-  const { ok, stdout } = await runQuick(AGY_BIN, ["models"], { timeout: 30_000 });
-  if (!ok) return [];
+/** agy lists every effort of a model as a model of its own ("gemini-4-hydrogen-high"). */
+export type Variant = { id: string; label: string };
+export function parseModels(stdout: string): Variant[] {
   return stdout
     .split(/\r?\n/)
     .map((l) => l.split("\t"))
     .filter((p) => p.length >= 2 && p[0].trim() && !p[0].includes(" "))
-    .map(([id, label]) => ({ id: id.trim(), label: label.trim(), detail: id.trim() }));
-});
+    .map(([id, label]) => ({ id: id.trim(), label: label.trim() }));
+}
+const variants = cached(
+  10 * 60_000,
+  async () => {
+    const { ok, stdout } = await runQuick(AGY_BIN, ["models"], { timeout: 30_000 });
+    return ok ? parseModels(stdout) : [];
+  },
+  (list) => list.length > 0,
+);
+
+/** A variant's label without its effort: "Gemini 4 Hydrogen (High)" → "Gemini 4 Hydrogen". */
+const familyLabel = (v: Variant) => (splitEffort(v.id)[1] ? v.label.replace(/\s*\((?:minimal|low|medium|x-?high|high|max)\)$/i, "") : v.label);
+
+const effortsOf = (all: Variant[], family: string) =>
+  EFFORTS.filter((e) => all.some((v) => v.id === `${family}-${e}`));
+
+/** The effort a family gets when none is chosen: that of agy's default model, else medium. */
+function familyDefault(all: Variant[], family: string, defaultVariant: string | null) {
+  const [f, e] = splitEffort(defaultVariant ?? "");
+  return f === family && e ? e : nearestEffort(effortsOf(all, family), "medium");
+}
+
+/** One model per family, with the efforts it comes in. */
+export function groupModels(all: Variant[], defaultVariant: string | null): Model[] {
+  const families = new Map<string, Variant>();
+  for (const v of all) {
+    const family = splitEffort(v.id)[0];
+    if (!families.has(family)) families.set(family, v);
+  }
+  return [...families].map(([family, v]) => ({
+    id: family,
+    label: familyLabel(v),
+    efforts: effortsOf(all, family),
+    defaultEffort: familyDefault(all, family, defaultVariant),
+  }));
+}
+
+/** The id to pass to agy for a model (a family, a full id, or null: agy's default) and an effort. */
+export function pickVariant(all: Variant[], model: string | null, effort: string | null, defaultVariant: string | null): string | null {
+  const wanted = model || defaultVariant;
+  if (!wanted) return null;
+  if (!effort && all.some((v) => v.id === wanted)) return wanted;
+  const family = all.some((v) => v.id === wanted) ? splitEffort(wanted)[0] : wanted;
+  const level = nearestEffort(effortsOf(all, family), effort ?? familyDefault(all, family, defaultVariant) ?? "medium");
+  if (level) return `${family}-${level}`;
+  // Not listed (or the list couldn't be read): agy knows best.
+  return effort && !all.length && !splitEffort(wanted)[1] ? `${wanted}-${effort}` : wanted;
+}
+
+const models = async () => groupModels(await variants(), await defaultId());
 
 // `agy --help` may exit non-zero; it's available as long as it can be started.
 const available = cached(60_000, async () => !(await runQuick(AGY_BIN, ["--help"], { timeout: 10_000 })).notFound);
 
 /** agy stores the default model by its display name in ~/.gemini/antigravity-cli/settings.json. */
-async function defaultModel(): Promise<Model | null> {
+async function defaultName(): Promise<string | null> {
   try {
     const file = process.env.AGY_SETTINGS ?? path.join(homedir(), ".gemini", "antigravity-cli", "settings.json");
     const name = JSON.parse(await readFile(file, "utf8")).model;
-    if (typeof name !== "string" || !name) return null;
-    const match = (await models()).find((m) => m.label === name || m.id === name);
-    return { id: "", label: match?.label ?? name, detail: match?.id };
+    return typeof name === "string" && name ? name : null;
   } catch {
     return null;
   }
 }
-
-async function describeModel(id: string) {
-  return (await models()).find((m) => m.id === id)?.label ?? id;
+async function defaultId(): Promise<string | null> {
+  const name = await defaultName();
+  return (name && (await variants()).find((v) => v.label === name || v.id === name)?.id) || null;
 }
 
-// Gemini's effort is part of the model id ("…-flash-high"), so no separate effort picker.
+async function defaultModel(): Promise<Model | null> {
+  const [name, id] = [await defaultName(), await defaultId()];
+  if (!id) return name ? { id: "", label: name } : null;
+  const family = (await models()).find((m) => m.id === splitEffort(id)[0]);
+  return family ? { ...family, id: "", detail: id } : null;
+}
+
+/** The family's name: the effort is recorded (and shown) separately. */
+async function describeModel(id: string) {
+  const v = (await variants()).find((m) => m.id === id);
+  return v ? familyLabel(v) : id;
+}
+
+async function defaultEffort(model: string | null) {
+  const id = pickVariant(await variants(), model, null, await defaultId());
+  return id ? splitEffort(id)[1] : null;
+}
+
+// agy runs other vendors' models too, but it is there for Gemini. Its effort is part of the model id.
 export const agy: Provider = {
   id: "agy",
-  label: "Antigravity",
+  label: "Gemini",
+  cli: "Antigravity CLI (agy)",
   sessionTag: SESSION_TAG,
   run,
   models,
   defaultModel,
   describeModel,
-  efforts: [],
+  efforts: EFFORTS,
   // Headless agy can't ask for approval per action (only `agy acp` could), and its search_web
   // can't be limited by permission rules: no web search rather than searches without a click.
-  webSearchNote: "Antigravity can't ask you to approve each search when it runs in the background, so web search is only available with Claude.",
-  defaultEffort: async () => null,
+  webSearchNote: "Gemini can't ask you to approve each search when it runs in the background, so web search is only available with Claude.",
+  defaultEffort,
   available,
 };
