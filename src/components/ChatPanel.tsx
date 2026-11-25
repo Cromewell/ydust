@@ -746,7 +746,13 @@ function MessageView(
       <Markdown onJump={onJump} hasDoc={hasDoc} size={size} onNoteLine={reviewed ? (line) => props.onOpenChatNote(reviewed.noteRef!.name, line) : undefined}>
         {prep(m.content)}
       </Markdown>
-      {reviewed && !busy && !m.stopped && (
+      {m.brokeOff && (
+        <div className="mt-2 flex gap-2 rounded-lg border border-red-200 bg-red-50 p-2.5 text-xs text-red-800 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
+          <TriangleAlert className="size-3.5 shrink-0" />
+          <p className="min-w-0 break-words">The answer broke off: {m.brokeOff}</p>
+        </div>
+      )}
+      {reviewed && !busy && !m.stopped && !m.brokeOff && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {reviewed.mode === "review-note" ? (
             <button

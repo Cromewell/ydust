@@ -54,12 +54,13 @@
 
 **Comfortable reading**
 
-- **Search** (`Ctrl+F`) across *all* pages, with result list and highlights. Forgiving: umlauts/accents, `ß`/`ss`, line breaks and hyphenation don't matter (`satze` finds `Sätze`).
+- **Search** (`Ctrl+F`) across *all* pages, with result list and highlights. Forgiving: umlauts/accents, `ß`/`ss`, line breaks and hyphenation don't matter (`satze` finds `Sätze`). `Ctrl+Shift+F` searches all PDFs of the folder.
 - **Table of contents** from the PDF's bookmarks, with the current chapter highlighted.
 - **Page colours**: dark pages (black to dark grey background, light text), a warm tint from 6500 K down to 2500 K (presets *Warm*, *Sepia*, *Night*), and brightness, so white pages don't glare.
 
   <img src="docs/images/colours.webp" width="560" alt="Dark, warm-tinted page with the page colours menu open">
 
+- **Back and forward** (Alt+← / Alt+→): after following a page link, return to the exact spot you were reading, also in another PDF.
 - Zoom, fit to width, page jump, remembers your last page, resizable chat, dark mode follows your system.
 
 **Your choice of assistant**
@@ -140,6 +141,8 @@ To find the right places quickly, ydust gives the tutor a map of every document 
 | --- | --- |
 | `Ctrl/Cmd + K` | Ask about the current selection |
 | `Ctrl/Cmd + F` | Search in the document |
+| `Ctrl/Cmd + Shift + F` | Search in all PDFs of the folder |
+| `Alt + ←` / `Alt + →` | Back to where you jumped from, forward again |
 | `S` | Snip a region of the page (when not typing) |
 | `Ctrl/Cmd + V` | Paste a picture into the chat |
 | `Enter` / `Shift + Enter` | Send / new line |

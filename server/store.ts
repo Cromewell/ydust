@@ -86,6 +86,8 @@ export type Message = {
   note?: string;
   error?: boolean;
   stopped?: boolean;
+  /** Assistant messages: the answer broke off with this error (`content` is what came before it). */
+  brokeOff?: string;
   createdAt: string;
 };
 
@@ -100,12 +102,14 @@ export type ChatData = {
   contextSigs?: Record<string, string>;
   /** Per provider: the printed page numbers (pageSignature) that session was last told about. */
   pageSigs?: Record<string, string>;
+  /** Per provider: whether that session was told about document tools, and that the chat's own PDF has text. */
+  toldText?: Record<string, { tools: boolean; doc: boolean }>;
   /** Per provider: version of ydust's document tools that session was told about. */
   toolsVersion?: Record<string, number>;
 };
 
 /** A chat's messages and CLI sessions, in chat.json next to meta.json / folder.json. */
-export const CHAT_KEYS = ["messages", "conversations", "sessionTags", "contextSigs", "pageSigs", "toolsVersion"] as const;
+export const CHAT_KEYS = ["messages", "conversations", "sessionTags", "contextSigs", "pageSigs", "toldText", "toolsVersion"] as const;
 
 export type DocMeta = {
   id: string;
@@ -268,6 +272,7 @@ function legacyChat(raw: Legacy): ChatData {
     ...(raw.sessionTags ? { sessionTags: raw.sessionTags } : {}),
     ...(raw.contextSigs ? { contextSigs: raw.contextSigs } : {}),
     ...(raw.pageSigs ? { pageSigs: raw.pageSigs } : {}),
+    ...(raw.toldText ? { toldText: raw.toldText } : {}),
     ...(raw.toolsVersion ? { toolsVersion: raw.toolsVersion } : {}),
   };
 }

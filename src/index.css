@@ -28,6 +28,17 @@
   @apply flex size-9 shrink-0 items-center justify-center rounded-xl text-white shadow-sm transition disabled:bg-zinc-300 disabled:shadow-none dark:disabled:bg-zinc-700;
 }
 
+/* Wide formulas scroll by themselves instead of widening the whole chat or note. (`relative`:
+   KaTeX's hidden MathML is positioned absolutely and would otherwise stick out.) */
+.prose .katex {
+  position: relative;
+}
+.prose .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.25em;
+}
+
 /* Floating menus */
 @keyframes pop {
   from {

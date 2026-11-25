@@ -35,7 +35,10 @@ type Props = {
   pdf: PDFDocumentProxy;
   zoom: Zoom;
   initialPage: number;
-  jump: { page: number; nonce: number } | null;
+  /** `offset`: how far into the page (0–1; then exactly there, without scrolling smoothly). */
+  jump: { page: number; offset?: number; nonce: number } | null;
+  /** Filled with a function that tells where the view is (the page at its top, and how far into it). */
+  position?: React.RefObject<(() => { page: number; offset: number } | null) | null>;
   onPageChange: (page: number) => void;
   onSelection: (sel: PdfSelection | null) => void;
   onScale: (scale: number) => void;
@@ -65,6 +68,7 @@ export function PdfViewer({
   zoom,
   initialPage,
   jump,
+  position,
   onPageChange,
   onSelection,
   onScale,
@@ -86,6 +90,9 @@ export function PdfViewer({
   const currentPage = useRef(initialPage);
   const pendingRange = useRef<Range | null>(null);
   const [highlights, setHighlights] = useState<Map<number, HighlightRect[]>>(() => new Map());
+
+  /** The last known scrollTop (a new layout may already have changed the box's own). */
+  const lastTop = useRef(0);
 
   /** The page in view and how far into it, kept while the page sizes are corrected. */
   const sizeAnchor = useRef<{ page: number; offset: number } | null>(null);
@@ -127,6 +134,7 @@ export function PdfViewer({
     sizeAnchor.current = null;
     const el = box.querySelector<HTMLElement>(`[data-page="${a.page}"]`);
     if (el) box.scrollTop = el.offsetTop + a.offset * el.offsetHeight;
+    lastTop.current = box.scrollTop;
     prevScale.current = scale; // already placed for the new layout (fit-width may have changed the zoom)
   }, [sizes]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -134,6 +142,7 @@ export function PdfViewer({
     const el = scrollRef.current?.querySelector<HTMLElement>(`[data-page="${page}"]`);
     if (el && scrollRef.current) {
       scrollRef.current.scrollTo({ top: el.offsetTop - GAP, behavior: smooth ? "smooth" : "auto" });
+      lastTop.current = scrollRef.current.scrollTop;
     }
   }, []);
 
@@ -166,8 +175,28 @@ export function PdfViewer({
 
   // Jumps requested from outside (e.g. a [p. 3] citation in the chat).
   useEffect(() => {
-    if (jump) scrollToPage(jump.page, true);
-  }, [jump, scrollToPage]);
+    if (!jump) return;
+    if (jump.offset === undefined) return scrollToPage(jump.page, true);
+    const box = scrollRef.current;
+    const el = box?.querySelector<HTMLElement>(`[data-page="${jump.page}"]`);
+    if (!box || !el) return;
+    box.scrollTo({ top: el.offsetTop + jump.offset * el.offsetHeight });
+    lastTop.current = box.scrollTop;
+  }, [jump, ready, scrollToPage]);
+
+  useEffect(() => {
+    if (!position) return;
+    position.current = () => {
+      const box = scrollRef.current;
+      const pages = box ? [...box.querySelectorAll<HTMLElement>("[data-page]")] : [];
+      // The gap above a page belongs to it (a jump to a page leaves it visible).
+      const el = pages.findLast((p) => p.offsetTop - GAP <= box!.scrollTop + 1);
+      return el ? { page: Number(el.dataset.page), offset: (box!.scrollTop - el.offsetTop) / el.offsetHeight } : null;
+    };
+    return () => {
+      position.current = null;
+    };
+  }, [position]);
 
   // Keep the same spot in view when zooming.
   useLayoutEffect(() => {
@@ -175,13 +204,21 @@ export function PdfViewer({
     if (!box || !didInit.current || prevScale.current === scale) return;
     const ratio = scale / prevScale.current;
     prevScale.current = scale;
-    box.scrollTop = (box.scrollTop + box.clientHeight / 2) * ratio - box.clientHeight / 2;
+    // Only the pages scale, not the gaps between them: find the page in the middle of the view and
+    // the spot on it in the old layout (the browser may have clamped or moved scrollTop: use the last known one).
+    const middle = lastTop.current + box.clientHeight / 2;
+    const pages = [...box.querySelectorAll<HTMLElement>("[data-page]")];
+    const oldTop = (i: number) => GAP * (i + 1) + (pages[i].offsetTop - GAP * (i + 1)) / ratio;
+    const i = Math.max(0, pages.findLastIndex((_, k) => oldTop(k) <= middle));
+    if (pages[i]) box.scrollTop = pages[i].offsetTop + (middle - oldTop(i)) * ratio - box.clientHeight / 2;
+    lastTop.current = box.scrollTop;
     box.scrollLeft = (box.scrollLeft + box.clientWidth / 2) * ratio - box.clientWidth / 2;
   }, [scale]);
 
   const onScroll = () => {
     const box = scrollRef.current;
     if (!box) return;
+    lastTop.current = box.scrollTop;
     const probe = box.scrollTop + box.clientHeight * 0.35;
     const pages = box.querySelectorAll<HTMLElement>("[data-page]");
     let page = 1;

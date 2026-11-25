@@ -129,6 +129,69 @@ describe("sessions", () => {
   });
 });
 
+describe("failed answers", () => {
+  const two = () => {
+    // The other CLI, scripted the same way.
+    PROVIDERS.agy = { ...PROVIDERS.claude, id: "agy", label: "Gemini" };
+  };
+
+  it("keeps what came before an error, says that it broke off, and keeps the old session", async () => {
+    const doc = await newDoc();
+    await ask(doc, { question: "first" });
+    script = async () => ({ ...ok("Half an answ", "sess-broken"), status: "ERROR", error: "quota exceeded" });
+    await ask(doc, { question: "second" });
+    const chat = (await store.readChat("doc", doc))!;
+    expect(chat.messages.at(-1)).toMatchObject({ content: "Half an answ", brokeOff: "quota exceeded" });
+    expect(chat.messages.at(-1)!.error).toBeFalsy();
+    expect(chat.conversations.claude).toBe("sess-new");
+    // The next question hands it over, as the session may not have it.
+    script = async () => ok("whole");
+    await ask(doc, { question: "go on" });
+    expect(runs.at(-1)!.prompt).toContain("Half an answ");
+  });
+
+  it("an error that only repeats itself as text is just an error", async () => {
+    const doc = await newDoc();
+    script = async () => ({ ...ok("usage limit"), status: "ERROR", error: "usage limit reached" });
+    await ask(doc, { question: "first" });
+    expect((await store.readChat("doc", doc))!.messages.at(-1)).toMatchObject({ error: true, content: "Claude: usage limit reached" });
+  });
+
+  it("doesn't lose what the other assistant said when the question after it failed", async () => {
+    two();
+    const doc = await newDoc();
+    await ask(doc, { question: "q1" });
+    script = async () => ok("the other one's answer", "agy-1");
+    await ask(doc, { question: "q2", provider: "agy" });
+    script = async () => ({ ...ok(""), status: "ERROR", error: "quota" });
+    await ask(doc, { question: "q3" });
+    script = async () => ok("fine");
+    await ask(doc, { question: "q4" });
+    expect(runs.at(-1)!.sessionId).toBe("sess-new");
+    expect(runs.at(-1)!.prompt).toContain("the other one's answer");
+    // Once it got through, it isn't repeated.
+    await ask(doc, { question: "q5" });
+    expect(runs.at(-1)!.prompt).not.toContain("the other one's answer");
+  });
+});
+
+describe("a PDF asked about before its text was read", () => {
+  it("is announced once the text is there, exactly once", async () => {
+    const doc = await newDoc();
+    await ask(doc, { question: "first" });
+    expect(runs[0].prompt).toContain("still being read");
+    expect(runs[0].prompt).not.toContain("read_pages");
+    await req("PUT", `/api/docs/${doc}/text`, { pages: ["Ein langer Text über Gruppen, Ringe und Körper, genug zum Lesen."], version: 4 });
+    await ask(doc, { question: "second" });
+    expect(runs[1].sessionId).toBe("sess-new");
+    expect(runs[1].prompt).toContain("now it can");
+    expect(runs[1].prompt).toContain("read_pages");
+    await ask(doc, { question: "third" });
+    expect(runs[2].prompt).not.toContain("now it can");
+    expect(runs[2].prompt).not.toContain("read_pages");
+  });
+});
+
 describe("prompts", () => {
   it("answers built-in prompts in the document's language, typed questions in theirs", async () => {
     const doc = await newDoc();

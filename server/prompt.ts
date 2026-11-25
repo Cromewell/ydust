@@ -113,6 +113,7 @@ function outlineExcerpt(d: DocRef) {
 /** One entry of a document list ("manifest") for the agent. */
 function describeDoc(d: DocRef, withOutline: boolean) {
   const head = `- [${d.alias}] "${d.name}"${d.pages ? ` (${d.pages} pages)` : ""}`;
+  if (d.hasText === null) return `${head}\n  Its text is still being read: you can't read it yet.`;
   if (!d.hasText) return `${head}\n  No text could be extracted (probably scanned): you can't read it.`;
   const lines = [head, `  Text: ${d.textFile}`];
   if (d.outlineFile) {
@@ -175,6 +176,8 @@ export function buildPrompt(opts: {
   firstTurn: boolean;
   /** The folder changed since this session last heard about it. */
   contextChanged?: boolean;
+  /** Text was extracted since then: tools can be used now, and the chat's own PDF can be read. */
+  textArrived?: { tools: boolean; doc: boolean };
   /** The documents' printed page numbers changed since then (e.g. they are known now). */
   pagesChanged?: boolean;
   /** ydust's search/read_pages tools are available in this turn. */
@@ -202,7 +205,7 @@ export function buildPrompt(opts: {
   /** The question is one of the app's built-in English prompts, so its language says nothing. */
   preset?: boolean;
 }) {
-  const { scope, question, quote, quoteDoc, pageText, images = [], language, firstTurn, contextChanged, pagesChanged, tools, noteTools, toolsIntro, history = [], docNames, level, mode, otherAnswer, revision, note, web, preset } = opts;
+  const { scope, question, quote, quoteDoc, pageText, images = [], language, firstTurn, contextChanged, pagesChanged, textArrived, tools, noteTools, toolsIntro, history = [], docNames, level, mode, otherAnswer, revision, note, web, preset } = opts;
   const parts: string[] = [];
   const isFolder = scope.kind === "folder";
 
@@ -215,7 +218,9 @@ export function buildPrompt(opts: {
         d.hasText
           ? `Its full extracted text is in ${d.textFile}; each page starts with a line "=== Page N ===".` +
               (d.outlineFile ? ` Its outline (headings with page numbers) is in ${d.outlineFile}.` : "")
-          : `Its text could not be extracted (it is probably a scanned document), so you only know what I quote.`,
+          : d.hasText === null
+            ? `Its text is still being read, so for now you only know what I quote.`
+            : `Its text could not be extracted (it is probably a scanned document), so you only know what I quote.`,
       );
     } else {
       intro.push(
@@ -259,6 +264,15 @@ export function buildPrompt(opts: {
     ];
     parts.push([...intro, ``, `Rules for the whole conversation:`, ...rules].join("\n"));
   }
+  if (!firstTurn && textArrived?.doc && scope.kind === "doc") {
+    const d = scope.doc;
+    parts.push(
+      `Note: the text of the PDF "${d.name}"${d.pages ? ` (${d.pages} pages)` : ""} could not be read before, but now it can: ` +
+        `it is in ${d.textFile}; each page starts with a line "=== Page N ===".` +
+        (d.outlineFile ? ` Its outline (headings with page numbers) is in ${d.outlineFile}.` : ""),
+    );
+  }
+  if (!firstTurn && !toolsIntro && tools && textArrived?.tools) parts.push(`Note: you have more tools from now on:\n${TOOLS_RULE}`);
   if (!firstTurn && toolsIntro && (tools || noteTools)) {
     const lines = [...(tools ? [TOOLS_RULE] : []), ...(noteTools ? [notesRule(noteTools)] : [])].join("\n");
     parts.push(
