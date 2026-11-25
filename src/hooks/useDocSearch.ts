@@ -20,6 +20,11 @@ export function useDocSearch(doc: { id: string; hasText: boolean | null } | null
   const [loading, setLoading] = useState(false);
   const [textsVersion, setTextsVersion] = useState(0);
   const texts = useRef<{ id: string; pages: string[] } | null>(null);
+  /** The hit to start at, once that document's hits are found (chosen in the folder's results). */
+  const startAt = useRef<{ doc: string; page: number; n: number } | null>(null);
+  /** The search was only taken along to another document: mark its hits, but don't jump to one. */
+  const [passive, setPassive] = useState(false);
+  const lastSearch = useRef<{ doc: string; query: string } | null>(null);
   const pageRef = useRef(page);
   pageRef.current = page;
 
@@ -45,8 +50,10 @@ export function useDocSearch(doc: { id: string; hasText: boolean | null } | null
   useEffect(() => {
     const q = query.trim();
     const pages = texts.current?.id === doc?.id ? texts.current?.pages : null;
+    if (!open) lastSearch.current = null;
     if (!open || q.length < 2 || !pages) {
       setHits([]);
+      setIndex(0);
       return;
     }
     const t = setTimeout(() => {
@@ -55,8 +62,14 @@ export function useDocSearch(doc: { id: string; hasText: boolean | null } | null
         findInString(text, q, MAX_HITS - found.length).forEach(([a, b], n) => found.push({ page: i + 1, n, ...snippet(text, a, b) }));
       });
       setHits(found);
-      // Start at the first hit at or after the page you're reading.
-      const from = found.findIndex((h) => h.page >= pageRef.current);
+      // Start at the hit that was asked for, else at the first one at or after the page you're reading.
+      const want = startAt.current?.doc === doc?.id ? startAt.current : null;
+      if (want) startAt.current = null;
+      const last = lastSearch.current;
+      setPassive(!want && !!last && last.doc !== doc!.id && last.query === q);
+      lastSearch.current = { doc: doc!.id, query: q };
+      const exact = want ? found.findIndex((h) => h.page === want.page && h.n === want.n) : -1;
+      const from = exact !== -1 ? exact : found.findIndex((h) => h.page >= (want?.page ?? pageRef.current));
       setIndex(from === -1 ? 0 : from);
       setNonce(Date.now());
     }, 180);
@@ -67,8 +80,8 @@ export function useDocSearch(doc: { id: string; hasText: boolean | null } | null
   const state = useMemo<SearchState | null>(() => {
     if (!open || query.trim().length < 2) return null;
     const h = hits[index];
-    return { query: query.trim(), current: h ? { page: h.page, n: h.n } : null, nonce };
-  }, [open, query, hits, index, nonce]);
+    return { query: query.trim(), current: h && !passive ? { page: h.page, n: h.n } : null, nonce };
+  }, [open, query, hits, index, nonce, passive]);
 
   return {
     open,
@@ -88,12 +101,18 @@ export function useDocSearch(doc: { id: string; hasText: boolean | null } | null
       setOpen((o) => !o);
       setFocusNonce(Date.now());
     }, []),
-    close: useCallback(() => setOpen(false), []),
+    close: useCallback(() => {
+      startAt.current = null;
+      setOpen(false);
+    }, []),
     /** Show the i-th hit (again). */
     go: useCallback((i: number) => {
       setIndex(i);
+      setPassive(false);
       setNonce(Date.now());
     }, []),
+    /** Start at this hit once the document's hits are found. */
+    startAt: useCallback((hit: { doc: string; page: number; n: number }) => void (startAt.current = hit), []),
     /** That document's text was extracted anew: load it again when searching. */
     forget: useCallback((id: string) => {
       if (texts.current?.id === id) {

@@ -59,6 +59,7 @@ import {
   type Quote,
 } from "./store.ts";
 import { noteNameProblem } from "../src/lib/noteNames.ts";
+import { findInString, fold, snippet } from "../src/lib/textMatch.ts";
 import { cleanLabels, relabelCitations } from "../src/lib/pageLabels.ts";
 
 const MAX_UPLOAD = 200 * 1024 * 1024;
@@ -422,6 +423,33 @@ app.get("/api/folders/:id", async (c) => {
   return c.json({ ...f, messages: chat.messages, busy: running.has(chatKey("folder", f.id)) });
 });
 
+// Search in all documents of a folder, like the in-document search (same matching, same hit numbers).
+const MAX_HITS_PER_DOC = 100;
+app.get("/api/folders/:id/search", async (c) => {
+  const f = await readFolder(c.req.param("id"));
+  if (!f) return c.json({ error: "not found" }, 404);
+  const q = (c.req.query("q") ?? "").trim().slice(0, 200);
+  if (fold(q).length < 2) return c.json({ docs: [], unread: 0 });
+  const docs: { id: string; total: number; hits: { page: number; n: number; before: string; match: string; after: string }[] }[] = [];
+  let unread = 0;
+  for (const meta of await metasOf(f.docIds)) {
+    const pages = meta.hasText ? await readAllPages(meta.id) : null;
+    if (!pages) {
+      unread++;
+      continue;
+    }
+    const doc = { id: meta.id, total: 0, hits: [] as (typeof docs)[number]["hits"] };
+    pages.forEach((text, i) => {
+      findInString(text, q).forEach(([a, b], n) => {
+        doc.total++;
+        if (doc.hits.length < MAX_HITS_PER_DOC) doc.hits.push({ page: i + 1, n, ...snippet(text, a, b) });
+      });
+    });
+    if (doc.total) docs.push(doc);
+  }
+  return c.json({ docs, unread });
+});
+
 app.patch("/api/folders/:id", async (c) => {
   const { name } = await c.req.json<{ name?: string }>();
   const f = await updateFolder(c.req.param("id"), (x) => {
@@ -498,6 +526,7 @@ function chatRoutes(kind: ChatKind, base: string) {
       delete m.sessionTags;
       delete m.contextSigs;
       delete m.pageSigs;
+      delete m.toldText;
       delete m.toolsVersion;
     });
     await clearImages(chatDir(kind, id));
@@ -712,6 +741,7 @@ type PreparedTurn = {
   tag: string;
   signature: string;
   pages: string;
+  toldText: { tools: boolean; doc: boolean };
   model: string | null;
   effort: string | null;
 };
@@ -813,6 +843,9 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
   const pages = pageSignature(scope);
   // ydust's search/read_pages tools over the chat's documents (that have text); the first is the default.
   const searchable = docs.filter((d) => d.hasText).map((d) => ({ alias: d.alias, name: d.name, textFile: d.textFile, highlightsFile: highlightsPath(d.id), metaFile: metaPath(d.id) }));
+  // A PDF asked about before its text was read: the session is told once it is there.
+  const toldText = { tools: searchable.length > 0, doc: scope.kind === "doc" && !!scope.doc.hasText };
+  const knew = chat.toldText?.[providerId];
   // …and the chat's notes; drafts come back here with this turn's token.
   // A review or challenge only reads: no write_note in that turn (fixes are asked for separately).
   const token = randomBytes(32).toString("hex");
@@ -836,7 +869,8 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
   // Everything since this assistant's last answer (all of it, if it has no session here).
   // Answers from before multi-provider support carry no provider: they were agy's.
   const answeredBy = (m: Message) => (m.role === "assistant" ? (m.provider ?? "agy") : null);
-  const lastOwn = chat.messages.map(answeredBy).lastIndexOf(providerId);
+  // (A failed answer doesn't count: its session may never have got the conversation handed over with it.)
+  const lastOwn = chat.messages.map((m) => (m.error || m.brokeOff ? null : answeredBy(m))).lastIndexOf(providerId);
   const promptFor = async (resumed: boolean) =>
     buildPrompt({
       scope,
@@ -852,13 +886,14 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
       tools: searchable.length > 0,
       // The rules stay the same from turn to turn, even when one turn can't write.
       noteTools: runtime.apiBase ? "write" : "read",
+      textArrived: resumed ? { tools: knew?.tools === false && toldText.tools, doc: knew?.doc === false && toldText.doc } : undefined,
       toolsIntro: resumed && (chat.toolsVersion?.[providerId] ?? 0) < TOOLS_VERSION,
       revision,
       note: note && noteRef ? { ...note, instructions: noteRef.instructions } : undefined,
       web,
       // What the other assistant discussed meanwhile is handed over as context
       // (everything, if this assistant starts a new session).
-      history: (resumed ? chat.messages.slice(lastOwn + 1) : chat.messages).filter((m) => (resumed ? answeredBy(m) !== providerId : true) && !shownAlready.has(m.id)),
+      history: (resumed ? chat.messages.slice(lastOwn + 1) : chat.messages).filter((m) => (resumed ? answeredBy(m) !== providerId || !!m.brokeOff : true) && !shownAlready.has(m.id)),
       docNames: new Map(docs.map((d) => [d.id, d.name])),
       level: typeof level === "string" ? level : undefined,
       mode,
@@ -901,6 +936,7 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
     tag,
     signature,
     pages,
+    toldText,
     model: typeof model === "string" && /^\w[\w.-]*(?:\[\w+\])?$/.test(model) ? model : null,
     effort: typeof effort === "string" && provider.efforts.includes(effort) ? effort : null,
   };
@@ -945,7 +981,11 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
 
       let content = result.response.trim();
       let error = false;
-      if (result.status !== "ABORTED" && (result.error || !content)) {
+      let brokeOff: string | undefined;
+      // An error after a part of the answer: keep the part (unless it is just the error's text), and say so.
+      const echo = !!result.error && (content.includes(result.error) || (result.error.includes(content) && content.length * 2 >= result.error.length));
+      if (result.status !== "ABORTED" && result.error && content && !echo) brokeOff = result.error;
+      else if (result.status !== "ABORTED" && (result.error || !content)) {
         error = true;
         content = result.error
           ? `${provider.label}: ${result.error}`
@@ -959,6 +999,7 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
         content,
         error,
         stopped: result.status === "ABORTED",
+        brokeOff,
         provider: providerId,
         model: usedModel ?? undefined,
         modelLabel: usedModel ? await provider.describeModel(usedModel).catch(() => usedModel) : undefined,
@@ -969,11 +1010,12 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
       });
       await updateChat(kind, id, (m) => {
         m.messages.push(assistant!);
-        if (result.sessionId && !error) {
+        if (result.sessionId && !error && !brokeOff) {
           m.conversations[providerId] = result.sessionId;
           m.sessionTags = { ...m.sessionTags, [providerId]: p.tag };
           m.contextSigs = { ...m.contextSigs, [providerId]: p.signature };
           m.pageSigs = { ...m.pageSigs, [providerId]: p.pages };
+          m.toldText = { ...m.toldText, [providerId]: p.toldText };
           m.toolsVersion = { ...m.toolsVersion, [providerId]: TOOLS_VERSION };
         } else if (restarted) {
           delete m.conversations[providerId]; // the next question starts a new session

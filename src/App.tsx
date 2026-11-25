@@ -1,5 +1,7 @@
 import clsx from "clsx";
 import {
+  ArrowLeft,
+  ArrowRight,
   Camera,
   Check,
   FileUp,
@@ -30,6 +32,7 @@ import { api, ask, type Approval, type AskMode, type Chat, type Highlight, type 
 import { downloadText, highlightsMarkdown, questionOf, safeFilename } from "./lib/export";
 import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
 import { nearestPage, pageLabel, relabelCitations, type PageLabels } from "./lib/pageLabels";
+import { NO_HISTORY, leave, step, type Spot } from "./lib/navHistory";
 import { splitEffort } from "./lib/effort";
 import { choose } from "./lib/models";
 import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
@@ -39,6 +42,7 @@ import { store } from "./lib/storage";
 import { useChatWidth } from "./hooks/useChatWidth";
 import { PageLabelContext, type PageLabelLookup } from "./hooks/usePageLabels";
 import { useDocSearch } from "./hooks/useDocSearch";
+import { useFolderSearch } from "./hooks/useFolderSearch";
 import { useHighlights } from "./hooks/useHighlights";
 import { needsText, useTextExtraction } from "./hooks/useTextExtraction";
 
@@ -65,7 +69,7 @@ export default function App() {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   /** Open this page (and flash this text) once that document has loaded. */
-  const pendingOpen = useRef<{ doc: string; page: number; text?: string } | null>(null);
+  const pendingOpen = useRef<{ doc: string; page: number; offset?: number; text?: string } | null>(null);
 
   // The chat: the open PDF's own, or (scope "folder") the one of its folder.
   const [scope, setScope] = useState<"doc" | "folder">(() => (store.get("scope") === "folder" ? "folder" : "doc"));
@@ -83,7 +87,7 @@ export default function App() {
   const [page, setPage] = useState(1);
   const [zoom, setZoom] = useState<Zoom>("fit");
   const [scale, setScale] = useState(1);
-  const [jump, setJump] = useState<{ page: number; nonce: number } | null>(null);
+  const [jump, setJump] = useState<{ page: number; offset?: number; nonce: number } | null>(null);
   const [selection, setSelection] = useState<PdfSelection | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
 
@@ -117,6 +121,9 @@ export default function App() {
   const [flashTarget, setFlashTarget] = useState<Flash | null>(null);
 
   const search = useDocSearch(doc, page);
+  /** The search covers the PDF's folder, not just the PDF. */
+  const [searchFolder, setSearchFolder] = useState(false);
+  const folderSearch = useFolderSearch(activeFolder?.id ?? null, search.query, search.open && searchFolder);
   const forgetPageTexts = search.forget;
   const [textSize, setTextSize] = useState<TextSize>(() => (store.get("textSize") as TextSize | null) ?? "s");
 
@@ -215,6 +222,7 @@ export default function App() {
         setDoc({ ...meta, lastPage: start });
         setPage(start);
         setPdf(p);
+        if (pending?.offset !== undefined) setJump({ page: start, offset: pending.offset, nonce: Date.now() });
         if (pending?.text) setFlashTarget({ page: start, text: pending.text, nonce: Date.now() });
         // First open (or outdated extraction): extract the text so the agent can read the whole document.
         if (needsText(meta)) void indexDoc(activeId, p);
@@ -355,21 +363,58 @@ export default function App() {
     }
   };
 
-  const jumpTo = useCallback((p: number) => setJump({ page: p, nonce: Date.now() }), []);
+  // --- Back and forward between the spots you jumped from ---
+  const [nav, setNav] = useState(NO_HISTORY);
+  const viewPosition = useRef<(() => { page: number; offset: number } | null) | null>(null);
+  const here = useCallback((): Spot | null => {
+    const at = viewPosition.current?.();
+    return at && activeId ? { doc: activeId, ...at } : null;
+  }, [activeId]);
+  /** Remember the spot you are at, right before jumping away from it. */
+  const remember = useCallback(() => {
+    const spot = here();
+    if (spot) setNav((h) => leave(h, spot));
+  }, [here]);
+  const canGo = (dir: "back" | "forward") => nav[dir].some((s) => docs.some((d) => d.id === s.doc));
+  const travel = useCallback(
+    (dir: "back" | "forward") => {
+      const from = here();
+      const r = from && step(nav, dir, from, (id) => docs.some((d) => d.id === id));
+      if (!r) return;
+      setNav(r.history);
+      if (r.to.doc === activeId) setJump({ page: r.to.page, offset: r.to.offset, nonce: Date.now() });
+      else {
+        pendingOpen.current = r.to;
+        setActiveId(r.to.doc);
+      }
+    },
+    [here, nav, docs, activeId],
+  );
+
+  const jumpTo = useCallback(
+    (p: number) => {
+      remember();
+      setJump({ page: p, nonce: Date.now() });
+    },
+    [remember],
+  );
 
   /** Show a page of any document (opening it first if needed), optionally flashing a passage. */
   const openAt = useCallback(
     (docId: string, p: number, text?: string) => {
       if (docId === activeId) {
-        if (text) setFlashTarget({ page: p, text, nonce: Date.now() });
-        else jumpTo(p);
+        if (text) {
+          remember();
+          setFlashTarget({ page: p, text, nonce: Date.now() });
+        } else jumpTo(p);
         return;
       }
       if (!docs.some((d) => d.id === docId)) return flash("That document is no longer in your library.");
+      remember();
       pendingOpen.current = { doc: docId, page: p, text };
       setActiveId(docId);
     },
-    [activeId, docs, jumpTo, flash],
+    [activeId, docs, jumpTo, remember, flash],
   );
   /**
    * The document of a page link in an answer: "#page=N" (the open PDF) or "#doc=<alias>&page=N".
@@ -878,7 +923,11 @@ export default function App() {
         e.preventDefault();
         const sel = window.getSelection()?.toString().trim();
         if (sel && sel.length < 80) search.setQuery(sel.replace(/\s+/g, " "));
+        setSearchFolder(e.shiftKey);
         search.show();
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight") && !isTyping(e.target)) {
+        e.preventDefault(); // not the browser's own back: it would leave ydust
+        travel(e.key === "ArrowLeft" ? "back" : "forward");
       } else if (e.key === "Escape" && (snipping || snipped)) {
         if (snipped) finishSnipping();
         else setSnipping(false);
@@ -893,7 +942,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [askAboutSelection, selection, snipping, snipped, startSnip, finishSnipping, pdf]);
+  }, [askAboutSelection, selection, snipping, snipped, startSnip, finishSnipping, pdf, travel]);
 
   const zoomBy = (dir: 1 | -1) => {
     const i = ZOOM_STEPS.findIndex((z) => z >= scale - 0.001);
@@ -945,7 +994,10 @@ export default function App() {
             activeId={activeId}
             uploading={uploading}
             indexing={new Set(Object.keys(progress))}
-            onSelect={setActiveId}
+            onSelect={(id) => {
+              if (id !== activeId) remember();
+              setActiveId(id);
+            }}
             onUpload={(files, folderId) => void upload(files, folderId)}
             onDelete={remove}
             onRename={rename}
@@ -973,6 +1025,16 @@ export default function App() {
             >
               <ListTree className="size-4" />
             </button>
+          )}
+          {(nav.back.length > 0 || nav.forward.length > 0) && (
+            <>
+              <button onClick={() => travel("back")} disabled={!pdf || !canGo("back")} className="icon-btn" title="Back to where you were (Alt+←)" aria-label="Back">
+                <ArrowLeft className="size-4" />
+              </button>
+              <button onClick={() => travel("forward")} disabled={!pdf || !canGo("forward")} className="icon-btn" title="Forward (Alt+→)" aria-label="Forward">
+                <ArrowRight className="size-4" />
+              </button>
+            </>
           )}
           <div className="min-w-0 flex-1 truncate px-2 text-sm font-medium">{doc?.name ?? ""}</div>
           {activeId && progress[activeId] && (
@@ -1085,6 +1147,28 @@ export default function App() {
               focusNonce={search.focusNonce}
               onGo={search.go}
               onClose={search.close}
+              folder={
+                activeFolder && activeFolder.docIds.length > 1
+                  ? {
+                      name: activeFolder.name,
+                      on: searchFolder,
+                      onToggle: setSearchFolder,
+                      ...folderSearch,
+                      activeDoc: doc.id,
+                      docName: (id) => docName(id) ?? "",
+                      onOpen: (id, hit) => {
+                        if (id === doc.id) {
+                          const i = search.hits.findIndex((h) => h.page === hit.page && h.n === hit.n);
+                          if (i !== -1) {
+                            remember();
+                            return search.go(i);
+                          }
+                        } else search.startAt({ doc: id, page: hit.page, n: hit.n });
+                        openAt(id, hit.page);
+                      },
+                    }
+                  : null
+              }
             />
           )}
           {snipping && (
@@ -1146,6 +1230,7 @@ export default function App() {
               jump={jump}
               onPageChange={setPage}
               onSelection={setSelection}
+              position={viewPosition}
               onScale={setScale}
               snipping={snipping}
               onSnip={handleSnip}

@@ -62,6 +62,8 @@ export type Message = {
   note?: string;
   error?: boolean;
   stopped?: boolean;
+  /** Assistant messages: the answer broke off with this error. */
+  brokeOff?: string;
   createdAt: string;
 };
 
@@ -95,6 +97,12 @@ export type FolderSummary = {
   messageCount: number;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Hits of a search in a folder, per document (`total` may be more than `hits`); `unread`: documents without text. */
+export type FolderHits = {
+  docs: { id: string; total: number; hits: { page: number; n: number; before: string; match: string; after: string }[] }[];
+  unread: number;
 };
 
 export type FolderMeta = Omit<FolderSummary, "messageCount"> & { messages: Message[]; busy?: boolean };
@@ -182,6 +190,7 @@ export const api = {
 
   listFolders: () => fetch("/api/folders").then(json<FolderSummary[]>),
   getFolder: (id: string) => fetch(`/api/folders/${id}`).then(json<FolderMeta>),
+  searchFolder: (id: string, q: string, signal?: AbortSignal) => fetch(`/api/folders/${id}/search?q=${encodeURIComponent(q)}`, { signal }).then(json<FolderHits>),
   createFolder: (name: string) => fetch("/api/folders", send("POST", { name })).then(json<FolderSummary>),
   patchFolder: (id: string, body: { name?: string }) => fetch(`/api/folders/${id}`, send("PATCH", body)).then(json<FolderSummary>),
   removeFolder: (id: string) => fetch(`/api/folders/${id}`, send("DELETE")).then(json<{ ok: true }>),

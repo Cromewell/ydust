@@ -9,7 +9,15 @@
 
 const DROP = /[\s­¨´`ˆ˜ˇ˚¸\-‐‑‒–—]/u;
 
+/** Every character is folded once: normalizing is slow, and a search folds whole books. */
+const folded = new Map<string, string>();
 function foldChar(c: string): string {
+  let f = folded.get(c);
+  if (f === undefined) folded.set(c, (f = computeFold(c)));
+  return f;
+}
+
+function computeFold(c: string): string {
   if (DROP.test(c)) return "";
   if (c === "ß" || c === "ẞ") return "ss";
   return c.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
@@ -41,7 +49,7 @@ function foldWithMap(s: string): { text: string; map: [number, number][] } {
 /** All occurrences of `query` in `s`, as [start, end) offsets into `s`. */
 export function findInString(s: string, query: string, limit = 1000): [number, number][] {
   const q = fold(query);
-  if (!q) return [];
+  if (!q || !fold(s).includes(q)) return []; // most pages: nothing to map back
   const { text, map } = foldWithMap(s);
   const out: [number, number][] = [];
   for (let at = text.indexOf(q); at !== -1 && out.length < limit; at = text.indexOf(q, at + q.length)) {

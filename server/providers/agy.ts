@@ -96,6 +96,7 @@ async function run(opts: RunOptions): Promise<AgentResult> {
   let denied: string[] = [];
   let lastTextStep = -1;
   let gotResult = false;
+  let resultError = "";
   let extra = "";
   // A conversation that no longer exists: agy only warns and starts a new, empty one, which
   // would answer without the rules and the chat so far. Stop it right away and say so.
@@ -156,6 +157,7 @@ async function run(opts: RunOptions): Promise<AgentResult> {
         status = r.status ?? status;
         sessionId = r.conversation_id ?? sessionId;
         if (typeof r.response === "string" && r.response.length > response.length) response = r.response;
+        resultError = typeof r.error === "string" ? r.error : typeof r.error?.message === "string" ? r.error.message : "";
         denied = (r.denied_actions ?? []).map((a: any) => a.display_name ?? a.action);
       }
     },
@@ -170,6 +172,8 @@ async function run(opts: RunOptions): Promise<AgentResult> {
   if (aborted) return { sessionId, response, status: "ABORTED", denied, error: null, model, effort };
   const diag = (stderr + extra).trim();
   if (!gotResult && code !== 0) return { sessionId, response, status: "ERROR", denied, error: diag || `agy exited with code ${code}`, model, effort };
+  // It may have said something before it failed: still a failure.
+  if (/ERROR|FAIL/i.test(status)) return { sessionId, response, status: "ERROR", denied, error: resultError || diag || "agy failed without saying why", model, effort };
   return { sessionId, response, status, denied, error: response.trim() ? null : diag || null, model, effort };
 }
 

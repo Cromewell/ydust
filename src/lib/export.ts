@@ -49,7 +49,7 @@ export function chatMarkdown(chat: Chat, providers: ProviderInfo[], docName?: Do
       out += `---\n\n### ${heading}\n\n${quoteBlock(m, docName, pages)}${m.noteRef ? (m.noteRef.instructions ?? "") : m.content}\n\n`;
       if (m.images?.length) out += `_(${m.images.length} picture${m.images.length > 1 ? "s" : ""} attached)_\n\n`;
     } else if (!m.error && m.content.trim()) {
-      out += `**${who(m, providers)}:**\n\n${plainCitations(pages.text(m.content))}\n\n`;
+      out += `**${who(m, providers)}:**\n\n${plainCitations(pages.text(m.content))}\n\n${m.brokeOff ? "_(The answer broke off here.)_\n\n" : ""}`;
       if (m.webQueries?.length) out += `_Web searches: ${m.webQueries.map((q) => `“${q}”`).join(", ")}_\n\n`;
       if (m.note) out += `> 📝 **My note:** ${m.note.replace(/\n/g, "\n> ")}\n\n`;
     }

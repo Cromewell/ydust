@@ -65,6 +65,14 @@ export const Markdown = memo(function Markdown({
         </span>
       );
     },
+    // A wide table scrolls by itself instead of widening the whole chat.
+    table({ children }) {
+      return (
+        <div className="overflow-x-auto">
+          <table>{children}</table>
+        </div>
+      );
+    },
     a({ href, children }) {
       const noteLine = href?.match(/^#note-line=(\d+)$/);
       if (noteLine) {
