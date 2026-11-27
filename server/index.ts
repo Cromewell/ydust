@@ -4,6 +4,7 @@ import path from "node:path";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { app, runtime } from "./app.ts";
+import { stopPadServer } from "./pad.ts";
 import { DEFAULT_LIBRARY_DIR, LIBRARY_DIR, LIBRARY_IN_APP_FOLDER, ensureAliases, ensureLibrary, migrateChats } from "./store.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -32,7 +33,7 @@ await migrateChats();
 await ensureAliases();
 if (process.env.YDUST_AUTH === "1") runtime.authToken = await authToken();
 
-serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) => {
+const server = serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) => {
   const host = HOST === "::1" ? "[::1]" : HOST === "localhost" ? "localhost" : "127.0.0.1";
   // ydust's MCP server hands drafts back here (always over loopback).
   runtime.apiBase = `http://${host}:${info.port}`;
@@ -49,3 +50,15 @@ serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) => {
     );
   }
 });
+
+let shuttingDown = false;
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    void stopPadServer().finally(() => {
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 2000).unref();
+    });
+  });
+}

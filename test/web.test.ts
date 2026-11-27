@@ -200,6 +200,25 @@ describe("web search, approved query by query", () => {
     expect(decision.behavior).toBe("deny");
   });
 
+  it("ending the turn unexpectedly also releases a waiting approval", async () => {
+    let pending: Promise<Response> | null = null;
+    script = async (_mcp, opts) => {
+      const token = opts.mcp!.env.YDUST_TURN_TOKEN;
+      pending = fetch(`${runtime.apiBase}/api/internal/approvals`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, kind: "web-search", query: "orphan" }),
+      });
+      // Give the server a moment to register the approval, then exit without answering it.
+      await new Promise((r) => setTimeout(r, 80));
+      throw new Error("CLI crashed");
+    };
+    await ask(url, { question: "q", web: true });
+    const res = await pending!;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ decision: "deny", reason: "stopped" });
+  });
+
   it("validates the user's decision", async () => {
     expect((await decide("nope", { decision: "allow" })).status).toBe(404);
     script = async (mcp) => (await mcp.permission("WebSearch", { query: "q" }), "ok");

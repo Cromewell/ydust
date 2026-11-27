@@ -10,7 +10,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { api, NoteConflict, type NoteOwner } from "../lib/api";
 import { downloadText } from "../lib/export";
 import { blockInsertion, noteEditor, type OpenEditor } from "../lib/notes";
-import type { TextSize } from "../lib/settings";
+import { useDismiss, type TextSize } from "../lib/settings";
 import { Markdown } from "./Markdown";
 
 const SAVE_DELAY = 800;
@@ -159,6 +159,8 @@ export default function NoteEditor({
     return [a, b];
   };
   const [reviewMenu, setReviewMenu] = useState(false);
+  const reviewRoot = useRef<HTMLDivElement>(null);
+  useDismiss(reviewMenu, useCallback(() => setReviewMenu(false), []), reviewRoot);
 
   // The editor itself, once per note.
   useEffect(() => {
@@ -348,7 +350,7 @@ export default function NoteEditor({
           ))}
         </div>
         {onReview && (
-          <div className="relative">
+          <div ref={reviewRoot} className="relative">
             <button
               onClick={() => setReviewMenu((v) => !v)}
               aria-expanded={reviewMenu}

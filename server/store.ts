@@ -322,12 +322,46 @@ export async function listDocs(): Promise<DocSummary[]> {
 }
 
 /** Next short alias ("d1", "d2", …). Never reused, so old citations can't point at another document. */
+type LibraryState = { nextAlias?: number; highlightLabels?: Record<string, string> };
+
 function nextAlias(): Promise<string> {
   return withLock("state", async () => {
-    const state = (await readJson<{ nextAlias?: number }>(STATE_PATH)) ?? {};
+    const state = (await readJson<LibraryState>(STATE_PATH)) ?? {};
     const n = state.nextAlias ?? 1;
     await writeJson(STATE_PATH, { ...state, nextAlias: n + 1 });
     return `d${n}`;
+  });
+}
+
+const HL_COLOR_SET = new Set(["yellow", "green", "blue", "pink", "orange"]);
+
+/** Clean user-defined names for highlight colours (e.g. { green: "Definition" }). */
+export function cleanHighlightLabels(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!HL_COLOR_SET.has(k) || typeof v !== "string") continue;
+    const clean = v.replace(/\s+/g, " ").trim().slice(0, 32);
+    if (clean) out[k] = clean;
+  }
+  return out;
+}
+
+export async function readHighlightLabels(): Promise<Record<string, string>> {
+  const state = await readJson<LibraryState>(STATE_PATH);
+  return cleanHighlightLabels(state?.highlightLabels);
+}
+
+export function writeHighlightLabels(raw: unknown): Promise<Record<string, string>> {
+  const labels = cleanHighlightLabels(raw);
+  return withLock("state", async () => {
+    const state = (await readJson<LibraryState>(STATE_PATH)) ?? {};
+    const next: LibraryState = { ...state };
+    if (Object.keys(labels).length) next.highlightLabels = labels;
+    else delete next.highlightLabels;
+    await mkdir(LIBRARY_DIR, { recursive: true });
+    await writeJson(STATE_PATH, next);
+    return labels;
   });
 }
 
@@ -404,17 +438,18 @@ export async function readAllPages(id: string): Promise<string[] | null> {
 }
 
 export async function readPageText(id: string, page: number): Promise<string | null> {
+  if (!Number.isInteger(page) || page < 1) return null;
   let body: string;
   try {
     body = await readFile(textPath(id), "utf8");
   } catch {
     return null;
   }
-  const start = body.indexOf(PAGE_MARKER(page));
-  if (start === -1) return null;
-  const from = start + PAGE_MARKER(page).length;
-  const end = body.indexOf(PAGE_MARKER(page + 1), from);
-  return body.slice(from, end === -1 ? undefined : end).trim();
+  const startMatch = new RegExp(`^=== Page ${page} ===$`, "m").exec(body);
+  if (!startMatch) return null;
+  const rest = body.slice(startMatch.index + startMatch[0].length);
+  const endMatch = new RegExp(`^=== Page ${page + 1} ===$`, "m").exec(rest);
+  return (endMatch ? rest.slice(0, endMatch.index) : rest).trim();
 }
 
 // --- Folders ---

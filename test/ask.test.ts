@@ -190,6 +190,19 @@ describe("a PDF asked about before its text was read", () => {
     expect(runs[2].prompt).not.toContain("now it can");
     expect(runs[2].prompt).not.toContain("read_pages");
   });
+
+  it("re-announces new text if the turn was aborted before init", async () => {
+    const doc = await newDoc();
+    await ask(doc, { question: "first" });
+    await req("PUT", `/api/docs/${doc}/text`, { pages: ["Ein langer Text über Gruppen, Ringe und Körper, genug zum Lesen."], version: 4 });
+    // Aborted before init arrives on the resumed session: the CLI never received the update.
+    script = async (opts) => ({ ...ok("", opts.sessionId ?? "sess-new"), status: "ABORTED" });
+    await ask(doc, { question: "aborted early" });
+    script = async () => ok("answer");
+    await ask(doc, { question: "next" });
+    expect(runs[2].prompt).toContain("now it can");
+    expect(runs[2].prompt).toContain("read_pages");
+  });
 });
 
 describe("prompts", () => {

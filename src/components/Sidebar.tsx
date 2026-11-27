@@ -1,7 +1,8 @@
 import clsx from "clsx";
-import { Check, ChevronRight, FileText, Folder, FolderInput, FolderOpen, FolderPlus, Loader2, MessageSquare, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronRight, FileText, Folder, FolderInput, FolderOpen, FolderPlus, Loader2, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api, type ChatTarget, type DocSummary, type FolderSummary } from "../lib/api";
+import { store } from "../lib/storage";
 
 /** A delete confirmation that names the notes (and a PDF's highlights) going with it, counted when you click the bin. */
 function useNoteCount(target: ChatTarget, asking: boolean) {
@@ -37,6 +38,8 @@ type Props = {
   uploading: number;
   /** Documents whose text is being read right now. */
   indexing: Set<string>;
+  /** Unified left-panel header tabs (Library | Contents | Marks). */
+  header?: React.ReactNode;
   onSelect: (id: string) => void;
   onUpload: (files: File[], folderId?: string | null) => void;
   onDelete: (id: string) => void;
@@ -46,11 +49,12 @@ type Props = {
   onRenameFolder: (id: string, name: string) => void;
   onDeleteFolder: (id: string) => void;
   onMove: (docId: string, folderId: string | null) => void;
+  onReorderFolder: (folderId: string, docIds: string[]) => void;
 };
 
 const readOpen = () => {
   try {
-    return new Set<string>(JSON.parse(localStorage.getItem("ydust:openFolders") ?? "[]"));
+    return new Set<string>(JSON.parse(store.get("openFolders") ?? "[]"));
   } catch {
     return new Set<string>();
   }
@@ -60,20 +64,18 @@ const readOpen = () => {
 export const markDropHandled = (e: React.DragEvent) => ((e.nativeEvent as DragEvent & { ydustHandled?: boolean }).ydustHandled = true);
 
 export function Sidebar(props: Props) {
-  const { docs, folders, activeId, uploading, onUpload, onCreateFolder, onMove } = props;
+  const { docs, folders, activeId, uploading, header, onUpload, onCreateFolder, onMove, onReorderFolder } = props;
   const input = useRef<HTMLInputElement>(null);
   const [uploadTarget, setUploadTarget] = useState<string | null>(null);
   const [open, setOpen] = useState(readOpen);
   const [renaming, setRenaming] = useState<string | null>(null); // folder id
   const [dropOn, setDropOn] = useState<string | null>(null); // folder id or "none"
+  const [dragDocId, setDragDocId] = useState<string | null>(null);
+  const [reorderHint, setReorderHint] = useState<{ folderId: string; targetId: string; after: boolean } | null>(null);
 
   const setOpenPersist = (next: Set<string>) => {
     setOpen(next);
-    try {
-      localStorage.setItem("ydust:openFolders", JSON.stringify([...next]));
-    } catch {
-      /* ignore */
-    }
+    store.set("openFolders", JSON.stringify([...next]));
   };
   const toggle = (id: string) => {
     const next = new Set(open);
@@ -135,18 +137,17 @@ export function Sidebar(props: Props) {
 
   return (
     <nav className="flex h-full min-h-0 flex-col bg-zinc-50 dark:bg-zinc-950">
-      <div className="flex h-12 shrink-0 items-center gap-2 px-4">
-        <img src="/favicon.svg" alt="" className="size-6" />
-        <span className="text-[15px] font-semibold tracking-tight">ydust</span>
-      </div>
-
-      <div className="px-3 pb-3">
+      {header}
+      <div className="flex items-center gap-2 px-3 pt-3 pb-2">
         <button
           onClick={() => pickFiles(null)}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
+          className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
         >
           {uploading ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
           {uploading ? "Uploading…" : "Add PDF"}
+        </button>
+        <button onClick={() => void newFolder()} className="icon-btn size-8 shrink-0" title="New folder">
+          <FolderPlus className="size-4" />
         </button>
         <input
           ref={input}
@@ -162,18 +163,34 @@ export function Sidebar(props: Props) {
         />
       </div>
 
-      <div className="flex items-center px-4 pb-1.5">
-        <span className="flex-1 text-[11px] font-medium tracking-wide text-zinc-400 uppercase">Library</span>
-        <button onClick={() => void newFolder()} className="icon-btn size-6" title="New folder">
-          <FolderPlus className="size-3.5" />
-        </button>
-      </div>
       <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {docs.length === 0 && folders.length === 0 && <li className="px-2 py-3 text-xs text-zinc-400">No documents yet.</li>}
 
         {folders.map((f) => {
           const members = f.docIds.map((id) => byId.get(id)).filter((d): d is DocSummary => !!d);
           const isOpen = open.has(f.id);
+          const reorder = (docId: string, targetId: string, after: boolean) => {
+            if (docId === targetId || !f.docIds.includes(docId)) return;
+            const rest = f.docIds.filter((id) => id !== docId);
+            const idx = rest.indexOf(targetId);
+            if (idx === -1) return;
+            rest.splice(after ? idx + 1 : idx, 0, docId);
+            if (rest.some((id, i) => id !== f.docIds[i])) onReorderFolder(f.id, rest);
+          };
+          const stepMember = (docId: string, delta: -1 | 1) => {
+            const i = f.docIds.indexOf(docId);
+            const j = i + delta;
+            if (i === -1 || j < 0 || j >= f.docIds.length) return;
+            const next = [...f.docIds];
+            [next[i], next[j]] = [next[j], next[i]];
+            onReorderFolder(f.id, next);
+          };
+          const sortAlpha = () => {
+            const sorted = [...members].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true })).map((d) => d.id);
+            const rest = f.docIds.filter((id) => !sorted.includes(id));
+            const next = [...sorted, ...rest];
+            if (next.some((id, i) => id !== f.docIds[i])) onReorderFolder(f.id, next);
+          };
           return (
             <li key={f.id} {...dropZone(f.id)} className={clsx("rounded-lg", dropOn === f.id && "bg-violet-100/70 ring-1 ring-violet-300 dark:bg-violet-500/10 dark:ring-violet-500/40")}>
               <FolderRow
@@ -189,13 +206,34 @@ export function Sidebar(props: Props) {
                 }}
                 onCancelRename={() => setRenaming(null)}
                 onAdd={() => pickFiles(f.id)}
+                onSort={members.length > 1 ? sortAlpha : undefined}
                 onDelete={() => props.onDeleteFolder(f.id)}
               />
               {isOpen && (
                 <ul className="ml-3 border-l border-zinc-200 pl-1 dark:border-zinc-800">
                   {members.length === 0 && <li className="px-2 py-1.5 text-[11px] text-zinc-400">Drag PDFs here, or use + to add some.</li>}
-                  {members.map((d) => (
-                    <DocRow key={d.id} {...props} doc={d} onNewFolder={(docId) => void newFolder(docId)} />
+                  {members.map((d, idx) => (
+                    <DocRow
+                      key={d.id}
+                      {...props}
+                      doc={d}
+                      onNewFolder={(docId) => void newFolder(docId)}
+                      onDragDoc={setDragDocId}
+                      canReorder={members.length > 1 ? { up: idx > 0, down: idx < members.length - 1, onStep: (delta) => stepMember(d.id, delta) } : undefined}
+                      dropLine={reorderHint?.folderId === f.id && reorderHint.targetId === d.id ? (reorderHint.after ? "after" : "before") : null}
+                      onReorderOver={(after) => {
+                        if (dragDocId && dragDocId !== d.id && f.docIds.includes(dragDocId)) {
+                          setReorderHint({ folderId: f.id, targetId: d.id, after });
+                        }
+                      }}
+                      onReorderLeave={() => setReorderHint((h) => (h?.targetId === d.id ? null : h))}
+                      onReorderDrop={(docId, after) => {
+                        setReorderHint(null);
+                        setDropOn(null);
+                        if (f.docIds.includes(docId)) reorder(docId, d.id, after);
+                        else onMove(docId, f.id);
+                      }}
+                    />
                   ))}
                 </ul>
               )}
@@ -210,7 +248,7 @@ export function Sidebar(props: Props) {
             )}
             <ul>
               {unfiled.map((d) => (
-                <DocRow key={d.id} {...props} doc={d} onNewFolder={(docId) => void newFolder(docId)} />
+                <DocRow key={d.id} {...props} doc={d} onNewFolder={(docId) => void newFolder(docId)} onDragDoc={setDragDocId} />
               ))}
             </ul>
           </li>
@@ -230,6 +268,7 @@ function FolderRow({
   onRename,
   onCancelRename,
   onAdd,
+  onSort,
   onDelete,
 }: {
   folder: FolderSummary;
@@ -241,6 +280,7 @@ function FolderRow({
   onRename: (name: string) => void;
   onCancelRename: () => void;
   onAdd: () => void;
+  onSort?: () => void;
   onDelete: () => void;
 }) {
   const [confirm, setConfirm] = useState(false);
@@ -252,7 +292,12 @@ function FolderRow({
       tabIndex={0}
       aria-expanded={open}
       onClick={onToggle}
-      onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && onToggle()}
+      onKeyDown={(e) => {
+        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+          e.preventDefault();
+          onToggle();
+        }
+      }}
       onDoubleClick={onStartRename}
       className="group flex cursor-pointer items-center gap-1.5 rounded-lg px-1.5 py-1.5 text-sm text-zinc-700 transition hover:bg-zinc-200/50 dark:text-zinc-300 dark:hover:bg-zinc-900"
     >
@@ -296,6 +341,18 @@ function FolderRow({
         >
           <Plus className="size-3.5" />
         </button>
+        {onSort && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onSort();
+            }}
+            className="rounded p-1 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            title="Sort PDFs A–Z"
+          >
+            <ArrowUpDown className="size-3.5" />
+          </button>
+        )}
         {confirm ? (
           <button
             autoFocus
@@ -327,8 +384,19 @@ function FolderRow({
   );
 }
 
-function DocRow(props: Props & { doc: DocSummary; onNewFolder: (docId: string) => void }) {
-  const { doc: d, folders, activeId, indexing, onSelect, onDelete, onRename, onMove, onNewFolder } = props;
+function DocRow(
+  props: Props & {
+    doc: DocSummary;
+    onNewFolder: (docId: string) => void;
+    onDragDoc: (id: string | null) => void;
+    canReorder?: { up: boolean; down: boolean; onStep: (delta: -1 | 1) => void };
+    dropLine?: "before" | "after" | null;
+    onReorderOver?: (after: boolean) => void;
+    onReorderLeave?: () => void;
+    onReorderDrop?: (docId: string, after: boolean) => void;
+  },
+) {
+  const { doc: d, folders, activeId, indexing, onSelect, onDelete, onRename, onMove, onNewFolder, onDragDoc, canReorder, dropLine, onReorderOver, onReorderLeave, onReorderDrop } = props;
   const [confirm, setConfirm] = useState(false);
   const notes = useNoteCount({ kind: "doc", id: d.id }, confirm);
   const [editing, setEditing] = useState(false);
@@ -336,7 +404,43 @@ function DocRow(props: Props & { doc: DocSummary; onNewFolder: (docId: string) =
   const active = d.id === activeId;
 
   return (
-    <li className="relative">
+    <li
+      className={clsx(
+        "relative",
+        dropLine === "before" && "before:pointer-events-none before:absolute before:inset-x-1 before:top-0 before:h-0.5 before:rounded-full before:bg-violet-500",
+        dropLine === "after" && "after:pointer-events-none after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:bg-violet-500",
+      )}
+      onDragOver={
+        onReorderOver
+          ? (e) => {
+              if (!e.dataTransfer.types.includes(DOC_MIME)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              const r = e.currentTarget.getBoundingClientRect();
+              onReorderOver(e.clientY > r.top + r.height / 2);
+            }
+          : undefined
+      }
+      onDragLeave={
+        onReorderLeave
+          ? (e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onReorderLeave();
+            }
+          : undefined
+      }
+      onDrop={
+        onReorderDrop
+          ? (e) => {
+              const doc = e.dataTransfer.getData(DOC_MIME);
+              if (!doc) return;
+              e.preventDefault();
+              e.stopPropagation();
+              const r = e.currentTarget.getBoundingClientRect();
+              onReorderDrop(doc, e.clientY > r.top + r.height / 2);
+            }
+          : undefined
+      }
+    >
       <div
         role="button"
         tabIndex={0}
@@ -344,9 +448,16 @@ function DocRow(props: Props & { doc: DocSummary; onNewFolder: (docId: string) =
         onDragStart={(e) => {
           e.dataTransfer.setData(DOC_MIME, d.id);
           e.dataTransfer.effectAllowed = "move";
+          onDragDoc(d.id);
         }}
+        onDragEnd={() => onDragDoc(null)}
         onClick={() => onSelect(d.id)}
-        onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && onSelect(d.id)}
+        onKeyDown={(e) => {
+          if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+            e.preventDefault();
+            onSelect(d.id);
+          }
+        }}
         onDoubleClick={() => setEditing(true)}
         className={clsx(
           "group flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2 text-sm transition",
@@ -463,6 +574,31 @@ function DocRow(props: Props & { doc: DocSummary; onNewFolder: (docId: string) =
                 onNewFolder(d.id);
               }}
             />
+            {canReorder && (
+              <>
+                <div className="my-1 h-px bg-zinc-100 dark:bg-zinc-800" />
+                {canReorder.up && (
+                  <MenuItem
+                    icon={<ArrowUp className="size-3.5 text-zinc-400" />}
+                    label="Move up"
+                    onClick={() => {
+                      setMenu(false);
+                      canReorder.onStep(-1);
+                    }}
+                  />
+                )}
+                {canReorder.down && (
+                  <MenuItem
+                    icon={<ArrowDown className="size-3.5 text-zinc-400" />}
+                    label="Move down"
+                    onClick={() => {
+                      setMenu(false);
+                      canReorder.onStep(1);
+                    }}
+                  />
+                )}
+              </>
+            )}
           </div>
         </>
       )}

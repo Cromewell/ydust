@@ -110,4 +110,15 @@ describe("highlights", () => {
     expect(await listHighlightsTool(docs, { color: "purple" })).toContain("must be one of");
     expect(await listHighlightsTool(docs, { doc: "d9" })).toContain("Unknown document");
   });
+
+  it("stores custom colour labels and lets list_highlights show and filter by them", async () => {
+    expect(await (await req("GET", "/api/highlight-labels")).json()).toEqual({});
+    const saved = await (await req("PUT", "/api/highlight-labels", { green: "  Definition ", orange: "Klausur", bogus: "ignored", yellow: "   " })).json();
+    expect(saved).toEqual({ green: "Definition", orange: "Klausur" });
+    expect(await (await req("GET", "/api/highlight-labels")).json()).toEqual({ green: "Definition", orange: "Klausur" });
+
+    const docs = [{ alias: "d1", name: "Analysis", textFile: "/none", highlightsFile: highlightsPath(doc) }];
+    const byLabel = await listHighlightsTool(docs, { color: "klausur" }, saved);
+    expect(byLabel).toBe(`1 highlight in orange · Klausur:\n\n[d1] "Analysis" (1):\n  p. 2 (orange · Klausur): «Cauchy» — my comment: know this`);
+  });
 });

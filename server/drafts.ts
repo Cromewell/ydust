@@ -191,10 +191,14 @@ export async function acceptDraft(
   kind: ChatKind,
   id: string,
   did: string,
-  body: { target?: unknown; base?: unknown },
+  body: { target?: unknown; base?: unknown; content?: unknown },
 ): Promise<{ target: string; mode: DraftMode; version: string; removed: string[] }> {
   const dir = draftsDir(kind, id);
   const notes = notesDir(kind, id);
+  if (body.content !== undefined) {
+    if (typeof body.content !== "string" || !body.content.trim()) throw new NoteError("`content` must be the note text.", 400);
+    if (Buffer.byteLength(body.content, "utf8") > MAX_DRAFT_BYTES) throw new NoteError("A draft can be at most 200 kB.", 413);
+  }
   return withLock(lockKey(dir), async () => {
     const draft = await readDraft(dir, did);
     if (!draft) throw new NoteError("This draft no longer exists.", 404);
@@ -206,16 +210,17 @@ export async function acceptDraft(
       const problem = noteNameProblem(target);
       if (problem) throw new NoteError(problem, 400);
     }
+    const content = typeof body.content === "string" ? body.content : draft.content;
     const current = await currentNote(notes, target);
     let saved: Note;
     if (draft.mode === "create") {
       if (current) throw new NoteError(`A note named "${target}" already exists.`, 409, { content: current.content, version: current.version });
-      saved = await saveNote(kind, id, target, draft.content, null);
+      saved = await saveNote(kind, id, target, content, null);
     } else {
       if (!current) throw new NoteError(`There is no note named "${target}" (any more).`, 404);
       const base = typeof body.base === "string" ? body.base : null;
       if (base !== current.version) throw new NoteError("The note changed since this diff was made.", 409, { content: current.content, version: current.version });
-      saved = await saveNote(kind, id, target, draft.mode === "append" ? appendBlock(current.content, draft.content) : draft.content, current.version);
+      saved = await saveNote(kind, id, target, draft.mode === "append" ? appendBlock(current.content, content) : content, current.version);
     }
     const removed = await dropChain(dir, draft);
     return { target, mode: draft.mode, version: saved.version, removed };

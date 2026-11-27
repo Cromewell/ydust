@@ -205,6 +205,13 @@ describe("text and outline", () => {
     expect(await store.readPageText(d.id, 1)).toBe("text 1");
     expect(await store.readPageText(d.id, 10)).toBe("text 10");
   });
+
+  it("ignores inline page marker text inside a page", async () => {
+    const d = await store.createDoc("InlineMarker", pdf);
+    await store.writeText(d.id, ["see === Page 2 === for details", "real page 2"]);
+    expect(await store.readPageText(d.id, 1)).toBe("see === Page 2 === for details");
+    expect(await store.readPageText(d.id, 2)).toBe("real page 2");
+  });
 });
 
 describe("folders", () => {

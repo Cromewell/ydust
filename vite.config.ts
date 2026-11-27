@@ -12,9 +12,16 @@ function pdfjsAssets(): Plugin {
     name: "pdfjs-assets",
     configureServer(server) {
       server.middlewares.use("/pdfjs", (req, res, next) => {
-        const rel = decodeURIComponent((req.url ?? "").split("?")[0]);
+        let rel: string;
+        try {
+          rel = decodeURIComponent((req.url ?? "").split("?")[0]);
+        } catch {
+          res.statusCode = 400;
+          res.end();
+          return;
+        }
         const file = path.join(src, rel);
-        if (!file.startsWith(src + path.sep) || !dirs.some((d) => rel.startsWith(`/${d}/`))) return next();
+        if (!dirs.some((d) => file.startsWith(path.join(src, d) + path.sep))) return next();
         if (!existsSync(file) || !statSync(file).isFile()) return next();
         createReadStream(file).pipe(res);
       });
@@ -32,6 +39,6 @@ export default defineConfig({
     port: 5173,
     proxy: { "/api": { target: "http://127.0.0.1:8787" } },
     // Like the server in production: never inside another site's frame.
-    headers: { "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'", "X-Content-Type-Options": "nosniff" },
+    headers: { "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" },
   },
 });

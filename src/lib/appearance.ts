@@ -71,3 +71,16 @@ export function parseAppearance(raw: string | null): PdfAppearance {
 }
 
 export const isDefaultAppearance = (a: PdfAppearance) => a.mode === "light" && a.kelvin >= NEUTRAL_K && a.brightness >= 100;
+
+/** App chrome theme: follow the OS, or force light/dark independently of the OS. */
+export type AppTheme = "system" | "light" | "dark";
+
+export function parseTheme(raw: string | null): AppTheme {
+  return raw === "light" || raw === "dark" ? raw : "system";
+}
+
+export function applyTheme(theme: AppTheme) {
+  const dark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.classList.toggle("dark", dark);
+  document.documentElement.style.colorScheme = dark ? "dark" : "light";
+}

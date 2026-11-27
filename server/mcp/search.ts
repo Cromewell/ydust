@@ -137,7 +137,7 @@ export async function search(docs: ScopeDoc[], args: { query?: unknown; doc?: un
       const printed = await printedOf(d);
       out.push("", `[${d.alias}] "${d.name}" (${found.length} page${found.length === 1 ? "" : "s"}):`);
       for (const p of found.slice(0, MAX_PER_DOC)) {
-        const [a, b] = findInString(p.text, query.split(/\s+/)[0], 1)[0] ?? [0, 0];
+        const [a, b] = findInString(p.text, words[0], 1)[0] ?? [0, 0];
         out.push(`  p. ${p.page}${printed(p.page)}: ${excerpt(p.text, a, b)}`);
       }
       if (found.length > MAX_PER_DOC) out.push(`  … ${found.length - MAX_PER_DOC} more pages`);
@@ -175,15 +175,30 @@ export async function readPages(docs: ScopeDoc[], args: { doc?: unknown; from?: 
 
 const COLORS = ["yellow", "green", "blue", "pink", "orange"];
 
-export async function listHighlightsTool(docs: ScopeDoc[], args: { doc?: unknown; color?: unknown }): Promise<string> {
+export async function listHighlightsTool(
+  docs: ScopeDoc[],
+  args: { doc?: unknown; color?: unknown },
+  labels: Record<string, string> = {},
+): Promise<string> {
   let scope = docs;
   if (args.doc !== undefined && args.doc !== null && args.doc !== "") {
     const d = findDoc(docs, args.doc);
     if (typeof d === "string") return d;
     scope = [d];
   }
-  const color = typeof args.color === "string" && args.color ? args.color.toLowerCase() : null;
-  if (color && !COLORS.includes(color)) return `\`color\` must be one of ${COLORS.join(", ")}.`;
+  const rawColor = typeof args.color === "string" && args.color.trim() ? args.color.trim().toLowerCase() : null;
+  let color: string | null = null;
+  if (rawColor) {
+    color =
+      COLORS.find((c) => c === rawColor) ??
+      COLORS.find((c) => labels[c] && fold(labels[c]) === fold(rawColor)) ??
+      null;
+    if (!color) {
+      const names = COLORS.map((c) => (labels[c] ? `${c} (${labels[c]})` : c)).join(", ");
+      return `\`color\` must be one of ${names}.`;
+    }
+  }
+  const tag = (c: string) => (labels[c] ? `${c} · ${labels[c]}` : c);
   const out: string[] = [];
   let total = 0;
   for (const d of scope) {
@@ -198,11 +213,11 @@ export async function listHighlightsTool(docs: ScopeDoc[], args: { doc?: unknown
     total += shown.length;
     out.push("", `[${d.alias}] "${d.name}" (${shown.length}):`);
     const printed = await printedOf(d);
-    for (const h of shown) out.push(`  p. ${h.page}${printed(h.page)} (${h.color}): «${oneLine(h.text).slice(0, 600)}»${h.comment ? ` — my comment: ${oneLine(h.comment)}` : ""}`);
+    for (const h of shown) out.push(`  p. ${h.page}${printed(h.page)} (${tag(h.color)}): «${oneLine(h.text).slice(0, 600)}»${h.comment ? ` — my comment: ${oneLine(h.comment)}` : ""}`);
   }
   if (!total && out.length) return out.join("\n").trim();
-  if (!total) return `No highlights${color ? ` in ${color}` : ""}${scope.length === 1 ? ` in [${scope[0].alias}] "${scope[0].name}"` : ""}.`;
-  return [`${total} highlight${total === 1 ? "" : "s"}${color ? ` in ${color}` : ""}:`, ...out].join("\n");
+  if (!total) return `No highlights${color ? ` in ${tag(color)}` : ""}${scope.length === 1 ? ` in [${scope[0].alias}] "${scope[0].name}"` : ""}.`;
+  return [`${total} highlight${total === 1 ? "" : "s"}${color ? ` in ${tag(color)}` : ""}:`, ...out].join("\n");
 }
 
 const DOC_TOOLS = [
@@ -404,10 +419,18 @@ const APPROVE_TOOL = {
 };
 
 /** The tools available with these documents and notes (and web search, for a web turn). */
-export function toolsFor(docs: ScopeDoc[], notes: NotesScope | null, opts: { web?: boolean } = {}) {
+export function toolsFor(docs: ScopeDoc[], notes: NotesScope | null, opts: { web?: boolean; highlightLabels?: Record<string, string> } = {}) {
   const reach = !!(notes?.api && notes.token);
+  const hlEntries = Object.entries(opts.highlightLabels ?? {}).filter(([k, v]) => COLORS.includes(k) && v);
+  const docTools = docs.length
+    ? DOC_TOOLS.map((t) =>
+        t.name === "list_highlights" && hlEntries.length
+          ? { ...t, description: `${t.description} User's colour labels: ${hlEntries.map(([c, l]) => `${c} = ${l}`).join(", ")}.` }
+          : t,
+      )
+    : [];
   return [
-    ...(docs.length ? DOC_TOOLS : []),
+    ...docTools,
     ...(notes ? NOTE_TOOLS : []),
     ...(reach && notes!.write !== false ? [WRITE_TOOL] : []),
     ...(reach && opts.web ? [APPROVE_TOOL] : []),
@@ -416,8 +439,8 @@ export function toolsFor(docs: ScopeDoc[], notes: NotesScope | null, opts: { web
 
 // --- JSON-RPC over stdio ---
 
-function serve(docs: ScopeDoc[], notes: NotesScope | null, web: boolean) {
-  const tools = toolsFor(docs, notes, { web });
+function serve(docs: ScopeDoc[], notes: NotesScope | null, web: boolean, highlightLabels: Record<string, string>) {
+  const tools = toolsFor(docs, notes, { web, highlightLabels });
   const has = (name: string) => tools.some((t) => t.name === name);
   const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
   createInterface({ input: process.stdin }).on("line", async (line) => {
@@ -456,7 +479,7 @@ function serve(docs: ScopeDoc[], notes: NotesScope | null, web: boolean) {
               : name === "read_pages"
                 ? await readPages(docs, args)
                 : name === "list_highlights"
-                  ? await listHighlightsTool(docs, args)
+                  ? await listHighlightsTool(docs, args, highlightLabels)
                 : name === "list_notes"
                   ? await listNotesTool(notes!)
                   : await readNoteTool(notes!, args);
@@ -489,4 +512,20 @@ function notesFromEnv(): NotesScope | null {
   return { dir, api: process.env.YDUST_API || undefined, token: process.env.YDUST_TURN_TOKEN || undefined, write: process.env.YDUST_NOTES_WRITE !== "0" };
 }
 
-if (process.env.YDUST_DOCS !== undefined || process.env.YDUST_NOTES_DIR !== undefined) serve(scopeFromEnv(), notesFromEnv(), process.env.YDUST_WEB === "1");
+function highlightLabelsFromEnv(): Record<string, string> {
+  try {
+    const raw = JSON.parse(process.env.YDUST_HL_LABELS ?? "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (COLORS.includes(k) && typeof v === "string" && v.trim()) out[k] = v.trim();
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+if (process.env.YDUST_DOCS !== undefined || process.env.YDUST_NOTES_DIR !== undefined) {
+  serve(scopeFromEnv(), notesFromEnv(), process.env.YDUST_WEB === "1", highlightLabelsFromEnv());
+}

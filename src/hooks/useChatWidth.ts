@@ -52,5 +52,11 @@ export function useChatWidth(reserved: number) {
     store.set("chatWidth", String(CHAT_DEFAULT));
   };
 
-  return { width, resizing, startResize, reset };
+  const nudge = (delta: number) => {
+    const next = Math.min(Math.max(width + delta, CHAT_MIN), max);
+    setChosen(next);
+    store.set("chatWidth", String(Math.round(next)));
+  };
+
+  return { width, min: CHAT_MIN, max, resizing, startResize, reset, nudge };
 }

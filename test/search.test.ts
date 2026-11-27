@@ -58,6 +58,9 @@ describe("search", () => {
     expect(out).toContain("p. 2:");
     expect(out).toContain("p. 3:");
     expect(out).not.toContain("Roads");
+    // Leading punctuation / 1-char tokens don't break the excerpt highlight.
+    const punctuated = await search([analysis], { query: "- Grenzwert Folge" });
+    expect(punctuated).toContain("«Grenzwert»");
   });
 
   it("limits hits per document and says how many more there are", async () => {

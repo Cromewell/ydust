@@ -1,6 +1,8 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { Hono, type Context, type Next } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -9,9 +11,24 @@ import { streamSSE } from "hono/streaming";
 import { PROVIDERS, isProviderId, type Provider, type ProviderId } from "./providers/index.ts";
 import { HighlightError, addHighlight, deleteHighlight, highlightsPath, listHighlights, patchHighlight } from "./highlights.ts";
 import { acceptDraft, clearDrafts, createDraft, discardDraft, getDraft, listDrafts, type DraftInfo } from "./drafts.ts";
+import { buildLatexConvertPrompt, buildLatexFixPrompt, compileLatex, extractTex, latexStatus, MAX_TEX_BYTES } from "./latex.ts";
 import { ydustServer, type McpServer, type McpTool } from "./mcp/launch.ts";
 import { MAX_NOTE_BYTES, NoteError, deleteNote, listNotes, notesDir, readNote, renameNote, saveNote } from "./notes.ts";
+import { padStatus, startPadServer, stopPadServer } from "./pad.ts";
 import { buildPrompt, pageSignature, scopeSignature, type DocRef, type Scope } from "./prompt.ts";
+import {
+  MAX_SKETCH_BYTES,
+  SketchError,
+  applyOp,
+  createSketch,
+  deleteSketch,
+  listSketches,
+  readSketch,
+  registerPcListener,
+  setChatBusyCheck,
+  sketchBus,
+  type SketchEvent,
+} from "./sketches.ts";
 import {
   ASK_MODES,
   IMAGE_TYPES,
@@ -38,6 +55,7 @@ import {
   readAllPages,
   readChat,
   readFolder,
+  readHighlightLabels,
   readMeta,
   readOutline,
   readPageText,
@@ -49,6 +67,7 @@ import {
   updateChat,
   updateFolder,
   updateMeta,
+  writeHighlightLabels,
   writeText,
   type AskMode,
   type ChatKind,
@@ -122,6 +141,7 @@ const asMessageDraft = (d: DraftInfo): MessageDraft => ({
   ...(d.replaces ? { replaces: d.replaces } : {}),
 });
 const chatKey = (kind: ChatKind, id: string) => `${kind}:${id}`;
+setChatBusyCheck((kind, id) => running.has(chatKey(kind, id)));
 
 // Only this app may talk to the API: block DNS rebinding (foreign Host header) and
 // cross-site requests from other web pages (foreign Origin), which could otherwise
@@ -150,6 +170,7 @@ app.use("*", async (c, next) => {
   c.header("X-Frame-Options", "DENY");
   c.header("Content-Security-Policy", "frame-ancestors 'none'");
   c.header("X-Content-Type-Options", "nosniff");
+  c.header("Referrer-Policy", "no-referrer");
 });
 
 app.use("/api/*", async (c, next) => {
@@ -178,11 +199,17 @@ app.use("/api/*", async (c, next) => {
 });
 
 /** Same token? (Constant time, so it can't be guessed character by character.) */
-const sameToken = (a: string | undefined, b: string) => !!a && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+const sameToken = (a: string | undefined, b: string) => {
+  if (!a) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+};
 
 // Optional sign-in (YDUST_AUTH=1, for shared computers): the link the server prints sets a cookie.
 // ydust's MCP server uses its turn token instead (internal routes).
 app.get("/api/auth", (c) => {
+  c.header("Cache-Control", "no-store");
   if (!runtime.authToken) return c.redirect("/");
   if (!sameToken(c.req.query("token"), runtime.authToken)) return c.json({ error: "That sign-in link is not valid (any more). Use the one ydust printed when it started." }, 403);
   setCookie(c, AUTH_COOKIE, runtime.authToken, { httpOnly: true, sameSite: "Strict", path: "/", maxAge: 400 * 24 * 3600 });
@@ -213,6 +240,13 @@ for (const base of ["/api/docs", "/api/folders"]) {
 
 app.get("/api/health", (c) => c.json({ ok: true, library: LIBRARY_DIR }));
 
+app.get("/api/highlight-labels", async (c) => c.json(await readHighlightLabels()));
+app.put("/api/highlight-labels", async (c) => {
+  const body = await readBody<Record<string, unknown>>(c);
+  if (!body) return c.json({ error: "invalid request" }, 400);
+  return c.json(await writeHighlightLabels(body));
+});
+
 app.get("/api/providers", async (c) =>
   c.json(
     await Promise.all(
@@ -227,13 +261,24 @@ app.get("/api/providers", async (c) =>
   ),
 );
 
+// --- Request bodies ---
+
+/** The request's JSON body if it is an object; null if it is missing, malformed or not an object. */
+async function readBody<T extends Record<string, unknown> = Record<string, unknown>>(c: Context): Promise<T | null> {
+  const body = await c.req.json<unknown>().catch(() => null);
+  return body && typeof body === "object" && !Array.isArray(body) ? (body as T) : null;
+}
+
+/** Like readBody, for routes that check each field themselves: no usable body reads as `{}`. */
+const bodyOf = async <T extends Record<string, unknown> = Record<string, unknown>>(c: Context): Promise<Partial<T>> => (await readBody<T>(c)) ?? {};
+
 // --- ydust's MCP server → this server (only while a turn runs, with its token) ---
 
 app.post("/api/internal/drafts", async (c) => {
   // Only the MCP process (a plain local HTTP client) calls this, never a web page: browsers send
   // Origin and Sec-Fetch-Site with every POST, Node's fetch sends neither (it does send Sec-Fetch-Mode).
   if (c.req.header("origin") || c.req.header("sec-fetch-site")) return c.json({ error: "forbidden" }, 403);
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+  const body = await bodyOf(c);
   const turn = typeof body.token === "string" && body.token.length === 64 ? turns.get(body.token) : undefined;
   if (!turn) return c.json({ error: "This conversation turn has ended." }, 403);
   if (!turn.write) return c.json({ error: "This answer only reads: it can't propose changes to notes." }, 403);
@@ -264,7 +309,7 @@ app.post("/api/internal/drafts", async (c) => {
  */
 app.post("/api/internal/approvals", async (c) => {
   if (c.req.header("origin") || c.req.header("sec-fetch-site")) return c.json({ error: "forbidden" }, 403);
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+  const body = await bodyOf(c);
   const turn = typeof body.token === "string" && body.token.length === 64 ? turns.get(body.token) : undefined;
   if (!turn) return c.json({ error: "This conversation turn has ended." }, 403);
   const query = typeof body.query === "string" ? body.query.trim().slice(0, 500) : "";
@@ -325,13 +370,19 @@ app.get("/api/docs/:id/file", async (c) => {
   const info = await stat(file).catch(() => null);
   if (!info) return c.json({ error: "not found" }, 404);
   return new Response(Readable.toWeb(createReadStream(file)) as ReadableStream, {
-    headers: { "Content-Type": "application/pdf", "Content-Length": String(info.size) },
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Length": String(info.size),
+      "Cache-Control": "private, max-age=31536000, immutable",
+    },
   });
 });
 
 app.patch("/api/docs/:id", async (c) => {
   const id = c.req.param("id");
-  const { name, lastPage, folderId } = await c.req.json<{ name?: string; lastPage?: number; folderId?: string | null }>();
+  const body = await readBody<{ name?: string; lastPage?: number; folderId?: string | null }>(c);
+  if (!body) return c.json({ error: "invalid request" }, 400);
+  const { name, lastPage, folderId } = body;
   if (folderId !== undefined) {
     if (folderId !== null && (typeof folderId !== "string" || !isValidId(folderId) || !(await readFolder(folderId)))) {
       return c.json({ error: "folder not found" }, 404);
@@ -348,7 +399,9 @@ app.patch("/api/docs/:id", async (c) => {
 
 app.put("/api/docs/:id/text", limit(MAX_TEXT_BODY, "the extracted text is too large"), async (c) => {
   const id = c.req.param("id");
-  const { pages, version, outline, labels } = await c.req.json<{ pages: string[]; version?: number; outline?: string; labels?: unknown }>();
+  const body = await readBody<{ pages?: string[]; version?: number; outline?: string; labels?: unknown }>(c);
+  if (!body) return c.json({ error: "invalid request" }, 400);
+  const { pages, version, outline, labels } = body;
   if (!Array.isArray(pages) || pages.some((p) => typeof p !== "string")) {
     return c.json({ error: "pages must be an array of strings" }, 400);
   }
@@ -371,6 +424,8 @@ app.delete("/api/docs/:id", async (c) => {
     run.controller.abort();
     await run.done; // let the stopped turn finish writing before the folder is removed
   }
+  const pad = padStatus();
+  if (pad.active && pad.kind === "doc" && pad.chatId === id) await stopPadServer();
   await deleteDoc(id);
   return c.json({ ok: true });
 });
@@ -385,7 +440,6 @@ const highlights = (fn: (c: Context, id: string) => Promise<Response>) => async 
     throw err;
   }
 };
-const bodyOf = (c: Context) => c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
 
 app.get(
   "/api/docs/:id/highlights",
@@ -412,8 +466,9 @@ app.get("/api/docs/:id/pages", async (c) => {
 app.get("/api/folders", async (c) => c.json(await listFolders()));
 
 app.post("/api/folders", async (c) => {
-  const { name } = await c.req.json<{ name?: string }>();
-  const clean = typeof name === "string" ? name.trim().slice(0, 200) : "";
+  const body = await readBody<{ name?: string }>(c);
+  if (!body) return c.json({ error: "invalid request" }, 400);
+  const clean = typeof body.name === "string" ? body.name.trim().slice(0, 200) : "";
   return c.json(summarizeFolder(await createFolder(clean || "New folder")), 201);
 });
 
@@ -451,11 +506,30 @@ app.get("/api/folders/:id/search", async (c) => {
 });
 
 app.patch("/api/folders/:id", async (c) => {
-  const { name } = await c.req.json<{ name?: string }>();
-  const f = await updateFolder(c.req.param("id"), (x) => {
-    if (typeof name === "string" && name.trim()) x.name = name.trim().slice(0, 200);
-  });
-  return c.json(summarizeFolder(f));
+  const body = await readBody<{ name?: string; docIds?: unknown }>(c);
+  if (!body) return c.json({ error: "invalid request" }, 400);
+  const { name, docIds } = body;
+  if (docIds !== undefined && (!Array.isArray(docIds) || docIds.some((d) => typeof d !== "string"))) {
+    return c.json({ error: "docIds must be an array of document ids" }, 400);
+  }
+  class InvalidOrder extends Error {}
+  try {
+    const f = await updateFolder(c.req.param("id"), (x) => {
+      if (typeof name === "string" && name.trim()) x.name = name.trim().slice(0, 200);
+      if (docIds !== undefined) {
+        const list = docIds as string[];
+        const current = new Set(x.docIds);
+        if (list.length !== x.docIds.length || new Set(list).size !== x.docIds.length || list.some((d) => !current.has(d))) {
+          throw new InvalidOrder();
+        }
+        x.docIds = [...list];
+      }
+    });
+    return c.json(summarizeFolder(f));
+  } catch (err) {
+    if (err instanceof InvalidOrder) return c.json({ error: "docIds must contain the exact documents of this folder" }, 400);
+    throw err;
+  }
 });
 
 app.delete("/api/folders/:id", async (c) => {
@@ -465,6 +539,8 @@ app.delete("/api/folders/:id", async (c) => {
     run.controller.abort();
     await run.done;
   }
+  const pad = padStatus();
+  if (pad.active && pad.kind === "folder" && pad.chatId === id) await stopPadServer();
   await deleteFolder(id);
   return c.json({ ok: true });
 });
@@ -541,7 +617,9 @@ function chatRoutes(kind: ChatKind, base: string) {
 
   // Pin an answer to the notes, or edit its note.
   app.patch(`${base}/:id/messages/:mid`, async (c) => {
-    const { pinned, note } = await c.req.json<{ pinned?: boolean; note?: string }>();
+    const body = await readBody<{ pinned?: boolean; note?: string }>(c);
+    if (!body) return c.json({ error: "invalid request" }, 400);
+    const { pinned, note } = body;
     let found: unknown = null;
     await updateChat(kind, c.req.param("id"), (m) => {
       const msg = m.messages.find((x) => x.id === c.req.param("mid") && x.role === "assistant");
@@ -575,12 +653,21 @@ function chatRoutes(kind: ChatKind, base: string) {
     `${base}/:id/notes/:name`,
     noteBody,
     notes(async (c, id) => {
-      const { content, baseVersion = null } = await c.req.json<{ content?: unknown; baseVersion?: unknown }>();
+      const body = await readBody<{ content?: unknown; baseVersion?: unknown }>(c);
+      if (!body) return c.json({ error: "invalid request" }, 400);
+      const { content, baseVersion = null } = body;
       const { content: _, ...saved } = await saveNote(kind, id, c.req.param("name")!, content, baseVersion);
       return c.json(saved);
     }),
   );
-  app.patch(`${base}/:id/notes/:name`, notes(async (c, id) => c.json(await renameNote(kind, id, c.req.param("name")!, (await c.req.json<{ name?: unknown }>()).name))));
+  app.patch(
+    `${base}/:id/notes/:name`,
+    notes(async (c, id) => {
+      const body = await readBody<{ name?: unknown }>(c);
+      if (!body) return c.json({ error: "invalid request" }, 400);
+      return c.json(await renameNote(kind, id, c.req.param("name")!, body.name));
+    }),
+  );
   app.delete(
     `${base}/:id/notes/:name`,
     notes(async (c, id) => {
@@ -593,7 +680,7 @@ function chatRoutes(kind: ChatKind, base: string) {
   app.post(`${base}/:id/approvals/:aid`, async (c) => {
     const id = c.req.param("id");
     const aid = c.req.param("aid");
-    const { decision, query } = await c.req.json<{ decision?: unknown; query?: unknown }>().catch(() => ({}) as { decision?: unknown; query?: unknown });
+    const { decision, query } = await bodyOf<{ decision?: unknown; query?: unknown }>(c);
     if (decision !== "allow" && decision !== "deny") return c.json({ error: "`decision` must be allow or deny." }, 400);
     const edited = typeof query === "string" ? query.trim().slice(0, 500) : undefined;
     if (decision === "allow" && query !== undefined && !edited) return c.json({ error: "The search query is empty." }, 400);
@@ -611,7 +698,7 @@ function chatRoutes(kind: ChatKind, base: string) {
     `${base}/:id/drafts/:did/accept`,
     notes(async (c, id) => {
       const did = c.req.param("did")!;
-      const body = await c.req.json<{ target?: unknown; base?: unknown }>().catch(() => ({}));
+      const body = await bodyOf<{ target?: unknown; base?: unknown; content?: unknown }>(c);
       const r = await acceptDraft(kind, id, did, body);
       await markDrafts(kind, id, Object.fromEntries(r.removed.map((x) => [x, x === did ? { status: "accepted", acceptedAs: r.target } : { status: "superseded" }])));
       return c.json(r);
@@ -626,6 +713,85 @@ function chatRoutes(kind: ChatKind, base: string) {
       return c.json({ ok: true, removed });
     }),
   );
+
+  // --- Scratchpads (handwritten sheets, locally or synced with a paired iPad) ---
+
+  const sketches = (fn: (c: Context, id: string) => Promise<Response>) => async (c: Context) => {
+    const id = c.req.param("id")!;
+    if (!(await chatExists(kind, id))) return c.json({ error: "not found" }, 404);
+    try {
+      return await fn(c, id);
+    } catch (err) {
+      if (err instanceof SketchError) return c.json({ error: err.message }, err.status);
+      throw err;
+    }
+  };
+  const opBody = limit(MAX_SKETCH_BYTES + 1024 * 1024, "Operation payload is too large.");
+
+  app.get(
+    `${base}/:id/sketches`,
+    sketches(async (c, id) => c.json(await listSketches(kind, id, { ensureDefault: c.req.query("ensure") === "1" }))),
+  );
+  app.post(
+    `${base}/:id/sketches`,
+    sketches(async (c, id) => c.json(await createSketch(kind, id, await bodyOf(c)), 201)),
+  );
+  app.get(`${base}/:id/sketches/:sid`, sketches(async (c, id) => c.json(await readSketch(kind, id, c.req.param("sid")!))));
+  app.post(
+    `${base}/:id/sketches/:sid/ops`,
+    opBody,
+    sketches(async (c, id) => {
+      const body = await readBody(c);
+      if (!body) return c.json({ error: "invalid request" }, 400);
+      const clientId = c.req.header("x-ydust-client")?.slice(0, 64) || "pc";
+      const op = await applyOp(kind, id, c.req.param("sid")!, body, clientId);
+      return c.json({ ok: true, op }, 201);
+    }),
+  );
+  app.delete(
+    `${base}/:id/sketches/:sid`,
+    sketches(async (c, id) => {
+      const sid = c.req.param("sid")!;
+      await deleteSketch(kind, id, sid);
+      const pad = padStatus();
+      if (pad.active && pad.kind === kind && pad.chatId === id && pad.sketchId === sid) await stopPadServer();
+      return c.json({ ok: true });
+    }),
+  );
+
+  // Live updates for the PC scratchpad (atomic ops from other tabs & iPad, full syncs, single-delivered iPad actions, client count).
+  app.get(`${base}/:id/sketches-events`, async (c) => {
+    const id = c.req.param("id")!;
+    if (!(await chatExists(kind, id))) return c.json({ error: "not found" }, 404);
+    const clientId = c.req.query("clientId")?.slice(0, 64) || "";
+    return streamSSE(c, async (stream) => {
+      let chain = Promise.resolve();
+      const send = (event: string, data: unknown) =>
+        (chain = chain.then(() => stream.writeSSE({ event, data: JSON.stringify(data) })).catch(() => {}));
+      const unregisterPc = registerPcListener(kind, id, (payload) => void send("pad-action", payload));
+      const pad = padStatus();
+      void send("pad-clients", { count: pad.active && pad.kind === kind && pad.chatId === id ? pad.clients : 0 });
+      const onEvent = (e: SketchEvent) => {
+        if (e.type === "pad-clients") {
+          const cur = padStatus();
+          void send("pad-clients", { count: cur.active && cur.kind === kind && cur.chatId === id ? e.count : 0 });
+        } else if (e.type === "pad-stopped") {
+          void send("pad-stopped", {});
+        } else if (e.kind === kind && e.chatId === id) {
+          if (e.type === "op" && (!clientId || e.source !== clientId)) void send("op", e);
+          else if (e.type === "sync" && (!clientId || e.source !== clientId)) void send("sync", e);
+        }
+      };
+      sketchBus.on("event", onEvent);
+      const ping = setInterval(() => void send("ping", {}), 20_000);
+      await new Promise<void>((resolve) => {
+        stream.onAbort(() => resolve());
+      });
+      clearInterval(ping);
+      sketchBus.off("event", onEvent);
+      unregisterPc();
+    });
+  });
 
   app.post(`${base}/:id/images`, limit(MAX_IMAGE + 1024 * 1024, "image is larger than 20 MB"), async (c) => {
     const id = c.req.param("id");
@@ -656,8 +822,8 @@ function chatRoutes(kind: ChatKind, base: string) {
   app.post(`${base}/:id/ask`, async (c) => {
     const id = c.req.param("id")!;
     const key = chatKey(kind, id);
-    const body = await c.req.json<AskBody>().catch(() => null);
-    if (!body || typeof body !== "object") return c.json({ error: "invalid request" }, 400);
+    const body = await readBody<AskBody>(c);
+    if (!body) return c.json({ error: "invalid request" }, 400);
     const providerId = body.provider ?? "agy";
     if (!isProviderId(providerId)) return c.json({ error: "unknown assistant" }, 400);
 
@@ -678,7 +844,13 @@ function chatRoutes(kind: ChatKind, base: string) {
     running.set(key, entry);
     let token: string | null = null;
     const release = () => {
-      if (token) turns.delete(token);
+      if (token) {
+        const t = turns.get(token);
+        turns.delete(token);
+        if (t) {
+          for (const done of [...t.approvals.values()]) done({ decision: "deny", reason: "stopped" });
+        }
+      }
       if (running.get(key) === entry) running.delete(key);
       finish();
     };
@@ -850,7 +1022,12 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
   // A review or challenge only reads: no write_note in that turn (fixes are asked for separately).
   const token = randomBytes(32).toString("hex");
   const readOnly = mode === "review-note" || mode === "challenge-note";
-  const { server: mcp, tools: mcpTools } = ydustServer(searchable, { dir: notesDir(kind, id), api: runtime.apiBase || undefined, token, write: !readOnly }, { web });
+  const highlightLabels = await readHighlightLabels();
+  const { server: mcp, tools: mcpTools } = ydustServer(
+    searchable,
+    { dir: notesDir(kind, id), api: runtime.apiBase || undefined, token, write: !readOnly },
+    { web, highlightLabels },
+  );
 
   const userMsg = newMessage({
     role: "user",
@@ -871,13 +1048,14 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
   const answeredBy = (m: Message) => (m.role === "assistant" ? (m.provider ?? "agy") : null);
   // (A failed answer doesn't count: its session may never have got the conversation handed over with it.)
   const lastOwn = chat.messages.map((m) => (m.error || m.brokeOff ? null : answeredBy(m))).lastIndexOf(providerId);
-  const promptFor = async (resumed: boolean) =>
+  const pageText = cleanQuote && quoteDocId ? await readPageText(quoteDocId, cleanQuote.page) : null;
+  const promptFor = (resumed: boolean) =>
     buildPrompt({
       scope,
       question: question!.trim(),
       quote: cleanQuote,
       quoteDoc: quoteDocId ? docs.find((d) => d.id === quoteDocId) : null,
-      pageText: cleanQuote && quoteDocId ? await readPageText(quoteDocId, cleanQuote.page) : null,
+      pageText,
       images: imageIds.map((img) => imagePath(dir, img)),
       language: typeof language === "string" ? language : undefined,
       firstTurn: !resumed,
@@ -900,7 +1078,8 @@ async function prepareTurn(c: Context, kind: ChatKind, id: string, body: AskBody
       otherAnswer,
       preset,
     });
-  const [prompt, freshPrompt] = await Promise.all([promptFor(!!sessionId), promptFor(false)]);
+  const freshPrompt = promptFor(false);
+  const prompt = sessionId ? promptFor(true) : freshPrompt;
 
   const turn: Turn = {
     kind,
@@ -956,8 +1135,10 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
     let assistant;
     try {
       void send("user", p.userMsg);
-      const run = (sessionId: string | null, prompt: string) =>
-        provider.run({
+      let gotInit = false;
+      const run = (sessionId: string | null, prompt: string) => {
+        gotInit = false;
+        return provider.run({
           effort: p.effort,
           prompt,
           cwd: p.dir,
@@ -969,10 +1150,12 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
           model: p.model,
           signal: controller.signal,
           onEvent: (e) => {
-            if (e.type === "delta") void send("delta", e.text);
+            if (e.type === "init") gotInit = true;
+            else if (e.type === "delta") void send("delta", e.text);
             else if (e.type === "tool") void send("tool", e);
           },
         });
+      };
       let result = await run(p.sessionId, p.prompt);
       // The CLI's session is gone (e.g. after reinstalling it): ask again in a new one, with
       // the rules and the chat so far. Other errors (a usage limit, …) keep the session.
@@ -1010,7 +1193,7 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
       });
       await updateChat(kind, id, (m) => {
         m.messages.push(assistant!);
-        if (result.sessionId && !error && !brokeOff) {
+        if (result.sessionId && !error && !brokeOff && (result.status !== "ABORTED" || gotInit || !!content)) {
           m.conversations[providerId] = result.sessionId;
           m.sessionTags = { ...m.sessionTags, [providerId]: p.tag };
           m.contextSigs = { ...m.contextSigs, [providerId]: p.signature };
@@ -1037,6 +1220,170 @@ function streamTurn(c: Context, kind: ChatKind, id: string, p: PreparedTurn, rel
   });
 }
 
+
+// --- iPad / tablet pairing (isolated LAN pad server) ---
+
+app.get("/api/pad", (c) => c.json(padStatus()));
+
+app.post("/api/pad/start", async (c) => {
+  const body = await readBody<{ kind?: unknown; chatId?: unknown; sketchId?: unknown; host?: unknown }>(c);
+  if (!body || (body.kind !== "doc" && body.kind !== "folder") || typeof body.chatId !== "string" || typeof body.sketchId !== "string") {
+    return c.json({ error: "invalid request" }, 400);
+  }
+  if (!isValidId(body.chatId)) return c.json({ error: "not found" }, 404);
+  const chatName = body.kind === "doc" ? (await readMeta(body.chatId))?.name : (await readFolder(body.chatId))?.name;
+  if (!chatName) return c.json({ error: "not found" }, 404);
+  try {
+    await readSketch(body.kind, body.chatId, body.sketchId);
+  } catch (err) {
+    if (err instanceof SketchError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+  const host = typeof body.host === "string" && body.host.trim() ? body.host.trim() : undefined;
+  const status = await startPadServer({ kind: body.kind, chatId: body.chatId, sketchId: body.sketchId, chatName, host });
+  return c.json(status);
+});
+
+app.post("/api/pad/stop", async (c) => {
+  await stopPadServer();
+  return c.json(padStatus());
+});
+
+// --- Handwriting → LaTeX (.tex) & local PDF compilation ---
+
+const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const isPng = (b: Buffer) => b.length >= 8 && PNG_SIG.every((v, i) => b[i] === v);
+const MAX_CONCURRENT_LATEX = 2;
+let activeLatexConversions = 0;
+
+app.get("/api/latex/status", async (c) => c.json(await latexStatus()));
+
+app.post("/api/latex/convert", limit(25 * 1024 * 1024, "Images are too large (max 25 MB)."), async (c) => {
+  if (activeLatexConversions >= MAX_CONCURRENT_LATEX) {
+    return c.json({ error: "Too many LaTeX conversions running at once. Please wait a moment." }, 429);
+  }
+  // Reserve slot synchronously before any await so concurrent bursts cannot slip past the cap.
+  activeLatexConversions++;
+  let work: string | null = null;
+  try {
+    const body = await readBody<{
+      provider?: unknown;
+      model?: unknown;
+      effort?: unknown;
+      language?: unknown;
+      title?: unknown;
+      images?: unknown;
+      tex?: unknown;
+      errorLog?: unknown;
+    }>(c);
+    if (!body) return c.json({ error: "invalid request" }, 400);
+    const providerId = typeof body.provider === "string" ? body.provider : "agy";
+    if (!isProviderId(providerId)) return c.json({ error: "unknown assistant" }, 400);
+    const provider = PROVIDERS[providerId];
+    const model = typeof body.model === "string" && /^\w[\w.-]*(?:\[\w+\])?$/.test(body.model) ? body.model : null;
+    const effort = typeof body.effort === "string" && provider.efforts.includes(body.effort) ? body.effort : null;
+
+    const isFix = typeof body.tex === "string" && typeof body.errorLog === "string";
+    work = await mkdtemp(path.join(tmpdir(), isFix ? "ydust-texfix-" : "ydust-texconv-"));
+    let prompt: string;
+    if (isFix) {
+      if (Buffer.byteLength(body.tex as string, "utf8") > MAX_TEX_BYTES) return c.json({ error: "LaTeX source is too large." }, 413);
+      prompt = buildLatexFixPrompt(body.tex as string, body.errorLog as string);
+    } else {
+      if (!Array.isArray(body.images) || !body.images.length || body.images.length > MAX_IMAGES_PER_QUESTION) {
+        return c.json({ error: `Provide 1 to ${MAX_IMAGES_PER_QUESTION} PNG images.` }, 400);
+      }
+      const imagePaths: string[] = [];
+      for (let i = 0; i < body.images.length; i++) {
+        const raw = body.images[i];
+        if (typeof raw !== "string") return c.json({ error: "invalid image" }, 400);
+        const buf = Buffer.from(raw.replace(/^data:image\/png;base64,/, ""), "base64");
+        if (!isPng(buf) || buf.byteLength > MAX_IMAGE) return c.json({ error: "only valid PNG images are supported" }, 415);
+        const file = path.join(work, `page-${i + 1}.png`);
+        await writeFile(file, buf);
+        imagePaths.push(file);
+      }
+      const status = await latexStatus();
+      prompt = buildLatexConvertPrompt({
+        imagePaths,
+        title: typeof body.title === "string" ? body.title.trim().slice(0, 120) : undefined,
+        language: typeof body.language === "string" ? body.language.trim().slice(0, 40) : undefined,
+        compiler: status.compiler,
+      });
+    }
+
+    const controller = new AbortController();
+    const onReqAbort = () => controller.abort();
+    if (c.req.raw.signal.aborted) controller.abort();
+    else c.req.raw.signal.addEventListener("abort", onReqAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(), 180_000);
+    let result;
+    try {
+      result = await provider.run({
+        prompt,
+        cwd: work,
+        readDirs: [],
+        mcp: null,
+        mcpTools: [],
+        web: false,
+        sessionId: null,
+        model,
+        effort,
+        signal: controller.signal,
+        onEvent: () => {},
+      });
+    } finally {
+      clearTimeout(timer);
+      c.req.raw.signal.removeEventListener("abort", onReqAbort);
+    }
+
+    if (controller.signal.aborted) return c.json({ error: "Cancelled." }, 499 as 400);
+    const tex = extractTex(result.response);
+    if (result.error && !tex) return c.json({ error: `${provider.label}: ${result.error}` }, 502);
+    if (!tex) return c.json({ error: `${provider.label} returned no LaTeX output.` }, 502);
+    return c.json({ tex });
+  } finally {
+    activeLatexConversions = Math.max(0, activeLatexConversions - 1);
+    if (work) await rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+app.post("/api/latex/compile", limit(MAX_TEX_BYTES + 128 * 1024, "LaTeX source is too large."), async (c) => {
+  const body = await readBody<{ tex?: unknown; filename?: unknown; importTo?: { folderId?: unknown } | null }>(c);
+  if (!body || typeof body.tex !== "string") return c.json({ error: "invalid request" }, 400);
+  let folderId: string | null = null;
+  const doImport = !!(body.importTo && typeof body.importTo === "object");
+  if (doImport) {
+    const rawFolder = body.importTo?.folderId;
+    if (rawFolder !== undefined && rawFolder !== null) {
+      if (typeof rawFolder !== "string" || !isValidId(rawFolder) || !(await readFolder(rawFolder))) {
+        return c.json({ error: "folder not found" }, 404);
+      }
+      folderId = rawFolder;
+    }
+  }
+  const compiled = await compileLatex(body.tex);
+  if (!compiled.ok) {
+    return c.json({ error: compiled.error, log: compiled.log, compiler: compiled.compiler }, 422);
+  }
+  const cleanName =
+    (typeof body.filename === "string" ? body.filename.replace(/\.pdf$/i, "").replace(/[^\p{L}\p{N} ._-]+/gu, "").trim().slice(0, 120) : "") ||
+    "Handwritten Notes";
+  if (doImport) {
+    const meta = await createDoc(cleanName, new Uint8Array(compiled.pdf));
+    if (folderId) await setDocFolder(meta.id, folderId);
+    return c.json(summarize(meta, folderId), 201);
+  }
+  const asciiName = cleanName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "") || "notes";
+  return new Response(new Uint8Array(compiled.pdf), {
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Length": String(compiled.pdf.byteLength),
+      "Content-Disposition": `inline; filename="${asciiName}.pdf"`,
+      "Cache-Control": "no-store",
+    },
+  });
+});
 
 chatRoutes("doc", "/api/docs");
 chatRoutes("folder", "/api/folders");
