@@ -1,4 +1,5 @@
 import type { Chat, Highlight, Message, Note, NoteOwner, ProviderInfo, Quote } from "./api";
+import { hlLabel, type HighlightLabels } from "./highlightColors";
 import { pageLabel, type PageLabels } from "./pageLabels";
 
 /** Resolves a document id to its name (quotes in folder chats). */
@@ -57,21 +58,6 @@ export function chatMarkdown(chat: Chat, providers: ProviderInfo[], docName?: Do
   return out;
 }
 
-export function notesMarkdown(chat: Chat, providers: ProviderInfo[], docName?: DocName, pages = PDF_PAGES) {
-  let out = header(chat, "Notes");
-  const pinned = chat.messages.filter((m) => m.role === "assistant" && m.pinned);
-  for (const a of pinned) {
-    const q = questionOf(chat.messages, a);
-    const title = q?.quote ? `p. ${pages.label(q.quote)} — ` : "";
-    out += `## ${title}${(q?.content ?? "Answer").split("\n")[0].slice(0, 100)}\n\n`;
-    if (q) out += quoteBlock(q, docName, pages);
-    if (a.note) out += `**My note:** ${a.note}\n\n`;
-    out += `${plainCitations(pages.text(a.content))}\n\n_— ${who(a, providers)}_\n\n`;
-  }
-  if (!pinned.length) out += "_No pinned answers yet._\n";
-  return out;
-}
-
 /** All note files of a document and its folder, as one Markdown file. */
 export function noteFilesMarkdown(groups: { owner: NoteOwner; notes: Note[] }[], relabel: (md: string, owner: NoteOwner) => string = (md) => md) {
   let out = `# Notes\n\n_Exported from ydust on ${new Date().toLocaleString()}_\n\n`;
@@ -84,10 +70,8 @@ export function noteFilesMarkdown(groups: { owner: NoteOwner; notes: Note[] }[],
   return out;
 }
 
-const COLOR_NAME: Record<Highlight["color"], string> = { yellow: "Yellow", green: "Green", blue: "Blue", pink: "Pink", orange: "Orange" };
-
 /** A document's highlights as Markdown, by page. */
-export function highlightsMarkdown(docName: string, list: Highlight[], labels?: PageLabels) {
+export function highlightsMarkdown(docName: string, list: Highlight[], labels?: PageLabels, colorLabels?: HighlightLabels) {
   let out = `# ${docName} — Highlights\n\n_Exported from ydust on ${new Date().toLocaleString()}_\n`;
   let page = 0;
   for (const h of [...list].sort((a, b) => a.page - b.page)) {
@@ -95,7 +79,7 @@ export function highlightsMarkdown(docName: string, list: Highlight[], labels?: 
       page = h.page;
       out += `\n## Page ${pageLabel(labels, page)}\n\n`;
     }
-    out += `- **${COLOR_NAME[h.color]}:** ${h.text}\n`;
+    out += `- **${hlLabel(h.color, colorLabels)}:** ${h.text}\n`;
     if (h.comment) out += `  _${h.comment.replace(/\s+/g, " ")}_\n`;
   }
   if (!list.length) out += "\n_No highlights._\n";

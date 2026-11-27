@@ -87,28 +87,57 @@ function pageHeading(items: TextItem[], text: string) {
 export type OutlineNode = { id: string; title: string; page: number | null; children: OutlineNode[] };
 type RawOutlineItem = Awaited<ReturnType<PDFDocumentProxy["getOutline"]>>[number];
 
+/** Resolve a PDF destination (named or explicit) to a 1-based page number, or null. */
+export async function resolveDest(pdf: PDFDocumentProxy, dest: unknown): Promise<number | null> {
+  try {
+    const explicit = typeof dest === "string" ? await pdf.getDestination(dest) : (dest as unknown[] | null);
+    const ref = explicit?.[0];
+    if (ref == null) return null;
+    if (typeof ref === "number") return ref + 1;
+    return (await pdf.getPageIndex(ref as Parameters<PDFDocumentProxy["getPageIndex"]>[0])) + 1;
+  } catch {
+    return null;
+  }
+}
+
+/** An internal link inside a PDF page (cross-reference, TOC entry, footnote), in viewport px. */
+export type PdfLink = { left: number; top: number; width: number; height: number; page: number };
+
+/** Internal PDF links on `page` (no external URLs or actions), mapped into `viewport` coordinates. */
+export async function pageLinks(
+  pdf: PDFDocumentProxy,
+  page: PDFPageProxy,
+  viewport: ReturnType<PDFPageProxy["getViewport"]>,
+): Promise<PdfLink[]> {
+  const annots = await page.getAnnotations({ intent: "display" }).catch(() => []);
+  const out: PdfLink[] = [];
+  for (const a of annots as Array<{ subtype?: string; dest?: unknown; url?: string; unsafeUrl?: string; rect?: number[] }>) {
+    if (a.subtype !== "Link" || !a.dest || a.url || a.unsafeUrl || !Array.isArray(a.rect) || a.rect.length !== 4) continue;
+    const target = await resolveDest(pdf, a.dest);
+    if (!target || target < 1 || target > pdf.numPages) continue;
+    const [rx1, ry1, rx2, ry2] = a.rect;
+    const [x1, y1] = viewport.convertToViewportPoint(rx1, ry1) as [number, number];
+    const [x2, y2] = viewport.convertToViewportPoint(rx2, ry2) as [number, number];
+    const left = Math.min(x1, x2);
+    const top = Math.min(y1, y2);
+    const width = Math.abs(x2 - x1);
+    const height = Math.abs(y2 - y1);
+    if (width >= 2 && height >= 2) out.push({ left, top, width, height, page: target });
+  }
+  return out;
+}
+
 /** Read the PDF's built-in outline (bookmarks) and resolve every entry to a page number. */
 export async function loadOutline(pdf: PDFDocumentProxy): Promise<OutlineNode[]> {
   const raw = await pdf.getOutline();
   if (!raw?.length) return [];
   let n = 0;
-  const resolve = async (dest: RawOutlineItem["dest"]): Promise<number | null> => {
-    try {
-      const explicit = typeof dest === "string" ? await pdf.getDestination(dest) : dest;
-      const ref = explicit?.[0];
-      if (ref == null) return null;
-      if (typeof ref === "number") return ref + 1;
-      return (await pdf.getPageIndex(ref as Parameters<PDFDocumentProxy["getPageIndex"]>[0])) + 1;
-    } catch {
-      return null;
-    }
-  };
   const walk = (items: RawOutlineItem[]): Promise<OutlineNode[]> =>
     Promise.all(
       items.map(async (it) => ({
         id: `o${n++}`,
         title: (it.title ?? "").trim() || "Untitled",
-        page: await resolve(it.dest),
+        page: await resolveDest(pdf, it.dest),
         children: it.items?.length ? await walk(it.items) : [],
       })),
     );

@@ -19,8 +19,13 @@ const serverFile = fileURLToPath(new URL("./search.ts", import.meta.url));
  * default for read_pages), and the chat's notes (drafts go back to ydust with the turn's
  * token). Absolute paths only: the CLI starts it from the chat's folder.
  */
-export function ydustServer(docs: ScopeDoc[], notes: NotesScope | null, opts: { web?: boolean } = {}): { server: McpServer; tools: McpTool[] } {
+export function ydustServer(
+  docs: ScopeDoc[],
+  notes: NotesScope | null,
+  opts: { web?: boolean; highlightLabels?: Record<string, string> } = {},
+): { server: McpServer; tools: McpTool[] } {
   const env: Record<string, string> = { YDUST_DOCS: JSON.stringify(docs) };
+  if (opts.highlightLabels && Object.keys(opts.highlightLabels).length) env.YDUST_HL_LABELS = JSON.stringify(opts.highlightLabels);
   if (notes) {
     env.YDUST_NOTES_DIR = notes.dir;
     if (notes.api && notes.token) {

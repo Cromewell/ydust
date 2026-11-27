@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { HighlightClick, PdfSelection } from "../components/PdfViewer";
 import { api, HL_COLORS, type Highlight, type HlColor } from "../lib/api";
 import { store } from "../lib/storage";
@@ -16,6 +16,11 @@ export function useHighlights(docId: string | null, flash: (msg: string) => void
     return HL_COLORS.includes(c as HlColor) ? (c as HlColor) : "yellow";
   });
   const [menu, setMenu] = useState<HighlightClick | null>(null);
+  // The list as last shown, to undo a change the server refused.
+  const shown = useRef(list);
+  useEffect(() => {
+    shown.current = list;
+  }, [list]);
   const setColor = useCallback((c: HlColor) => {
     setColorState(c);
     store.set("hlColor", c);
@@ -50,9 +55,19 @@ export function useHighlights(docId: string | null, flash: (msg: string) => void
   const change = useCallback(
     async (id: string, patch: { color?: HlColor; comment?: string }) => {
       if (!docId) return;
+      const prev = shown.current.find((h) => h.id === id);
       setList((l) => l.map((h) => (h.id === id ? { ...h, ...patch, comment: patch.comment === undefined ? h.comment : patch.comment || undefined } : h)));
       if (patch.color) setColor(patch.color);
-      await api.patchHighlight(docId, id, patch).catch((e) => flash(`Could not save: ${(e as Error).message}`));
+      try {
+        await api.patchHighlight(docId, id, patch);
+      } catch (e) {
+        // Undo only what this change touched (another change may have been saved meanwhile).
+        if (prev) {
+          const undo = { ...(patch.color !== undefined && { color: prev.color }), ...(patch.comment !== undefined && { comment: prev.comment }) };
+          setList((l) => l.map((h) => (h.id === id ? { ...h, ...undo } : h)));
+        }
+        flash(`Could not save: ${(e as Error).message}`);
+      }
     },
     [docId, flash, setColor],
   );
@@ -61,8 +76,14 @@ export function useHighlights(docId: string | null, flash: (msg: string) => void
     async (id: string) => {
       if (!docId) return;
       setMenu(null);
+      const prev = shown.current.find((h) => h.id === id);
       setList((l) => l.filter((h) => h.id !== id));
-      await api.removeHighlight(docId, id).catch((e) => flash(`Could not delete: ${(e as Error).message}`));
+      try {
+        await api.removeHighlight(docId, id);
+      } catch (e) {
+        if (prev) setList((l) => (l.some((h) => h.id === id) ? l : [...l, prev].sort(byPage)));
+        flash(`Could not delete: ${(e as Error).message}`);
+      }
     },
     [docId, flash],
   );

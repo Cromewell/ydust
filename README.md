@@ -27,10 +27,10 @@
 
 ![Selecting a passage opens a menu: Ask, Check me, Explain, Summarize, Quiz me](docs/images/selection.webp)
 
-- **Select → Ask / Explain / Summarize / Quiz me**: a small menu appears where you finish selecting text. Selections work cleanly across lines and pages; double-click selects a word, triple-click a line.
+- **Select → Ask / Check me / Explain / Quiz me**: a small menu appears where you finish selecting text. Selections work cleanly across lines and pages; double-click selects a word, triple-click a line.
 - **Snip pictures**: press `S` (or the camera button) and drag a box over the page. The region is rendered sharply and attached to your question. Good for figures, formulas and scanned pages.
 - **Paste pictures**: `Ctrl+V` a screenshot or photo into the chat.
-- **Answers stream in** with Markdown, LaTeX math and clickable page citations (`p. 3`) that jump to the page.
+- **Answers stream in** with Markdown, LaTeX math and clickable page citations (`p. 3`) that jump to the page. Failed or cut-off answers carry a **Retry** button.
 - **The tutor knows the whole document**: it searches it and reads any page by itself, not just the passage you selected. Its search is as forgiving as yours (accents, `ß`/`ss`, hyphenation don't matter).
 
 **Learn, don't just read**
@@ -38,30 +38,32 @@
 - **Check my understanding**: select a passage → *Check me*, then explain it in your own words. You get feedback, hints and a follow-up question, not the full solution.
 - **Explanation level**: Beginner, Student, Advanced or Exam prep.
 - **Second opinion**: under every answer, *Ask Claude* / *Ask Gemini* asks the other assistant the same question and lets it check the first answer.
-- **Notes**: write your own Markdown notes next to the PDF, with formulas (`$x^2$`, `$$\int f$$`) and page links (`[p. 12](#page=12)`) that work in the preview (`#page=` counts the PDF's pages; links show the number printed on the page). Every PDF and every folder has its own notes; they are plain `.md` files you can also open in any other editor. Notes save themselves as you type, and a note changed in another editor meanwhile is never overwritten without asking.
+- **Notes**: write your own Markdown notes next to the PDF, with formulas (`$x^2$`, `$$\int f$$`) and page links (`[p. 12](#page=12)`) that work in the preview (`#page=` counts the PDF's pages; links show the number printed on the page). Every PDF and every folder has its own notes; they are plain `.md` files you can also open in any other editor. Notes save themselves as you type, and a note changed in another editor meanwhile is never overwritten without asking. Export notes or the whole chat as Markdown.
+- **Handwritten Scratchpad, iPad Pairing & LaTeX / PDF Export**: open the **Pad** tab to write proofs, derivations, and calculations by hand (grid, dot, or blank sheets, multiple pages, pressure-sensitive stylus support). Click **Pair iPad** to show a QR code that opens an Apple-Pencil-ready pad on your iPad over your local Wi-Fi or Tailscale network, live-synced to your PC. Send sheets straight to the tutor (**Attach** or **Check** proof) or click **LaTeX / PDF** to convert your handwriting into standalone `.tex` source, compile it locally with `pdflatex` (with one-click **Fix with AI** on compile errors), download `.tex`/`.pdf`, or import the compiled PDF straight into your library.
 - **Add to note**: select a passage → *Notes* → *Add to note* quotes it with its page link (at the cursor, if a note is open). *Insert into note* under an answer adds the question, the passage and the answer.
-- **The tutor writes into your notes, you decide**: ask for exercises, a summary or a cheat sheet "into a note" (or select a passage → *Notes* → *Write exercises* / *Summarize to note*). The assistant picks a fitting note or a new name, and you get a diff under the answer, like in git: *Accept* writes it and opens the note, *Request changes* gets a second version (the first stays one click away), *Discard* leaves no trace. Nothing is written without your click, and a note you changed meanwhile is never overwritten: the diff is shown again against your new text.
+- **The tutor writes into your notes, you decide**: ask for exercises, a summary or a cheat sheet "into a note" (or select a passage → *Notes* → *Write exercises* / *Summarize to note*). The assistant picks a fitting note or a new name, and you get a diff under the answer, like in git: *Accept* writes it and opens the note, *Edit* lets you tweak the draft directly before accepting, *Request changes* gets a second version (the first stays one click away), *Discard* leaves no trace. Nothing is written without your click, and a note you changed meanwhile is never overwritten: the diff is shown again against your new text.
 - **Review / Challenge your notes**: in the note editor, *Review* sends the note (or the lines you selected) to the assistant you have chosen. *Review* checks it against the documents: what is wrong, imprecise or missing, each finding with the page and a link to the line of your note (`L12`, click it to jump there). *Propose fixes* under a review drafts the corrections, which you accept as a diff like any draft. *Challenge me* asks 3 to 5 probing questions instead, without answers; *Answer these* lets you reply in *Check me* mode. A folder's note is reviewed in the folder chat.
-- **Pinned**: pin answers to the *Pinned* tab and add a comment to each. Export notes, pinned answers or the whole chat as Markdown.
 - **Web search, only when you want it**: click the globe next to the chat box, and the next question may search the web (Claude only). Every query the assistant wants to run pops up first: *Allow*, *Edit* (change the query, then search) or *Deny*. A denied search still gets an answer, from the documents. Answers cite web sources as links (opening in a new tab) and carry a *Web* badge listing the searches you allowed.
-- **Highlights in five colours**: select text and click a coloured dot to mark it, without asking anything (the colour you used last is ringed). Click a highlight to change its colour, add a comment, *Ask about it*, *Add to note* or delete it. The *Highlights* list next to the table of contents shows them by page, filters by colour, jumps to each one, exports them as Markdown or copies them into a note. Ask the tutor about them too, e.g. "quiz me on what I marked in green". Highlights stay put when you zoom, switch to dark pages or reopen the PDF.
-- **Discussed passages**: passages you asked about are tinted in the PDF with a small bubble. Click it to jump to the answer; click a quote in the chat to jump to the passage.
+- **Highlights in five colours with custom labels**: select text and click the coloured dot (or open its menu for all five colours) to mark it, without asking anything. Give each colour your own meaning (e.g. *Definition*, *Exam*) in the *Marks* tab — the tutor sees those labels too. Click a highlight to change its colour, add a comment, *Ask about it*, *Add to note* or delete it. The *Marks* tab in the sidebar lists them by page, filters by colour, jumps to each one, exports them as Markdown or copies them into a note. Ask the tutor about them too, e.g. "quiz me on what I marked as Exam". Highlights stay put when you zoom, switch to dark pages or reopen the PDF.
+- **Discussed passages**: passages you asked about are underlined in the PDF with a small bubble. Click it to jump to the answer; click a quote in the chat to jump to the passage.
 
 **Study a whole course**
 
-- **Folders** group PDFs that belong together (lecture notes, slides, exercise sheets, old exams).
+- **Folders** group PDFs that belong together (lecture notes, slides, exercise sheets, old exams). Reorder PDFs inside a folder by drag-and-drop, up/down menu actions, or A–Z sort.
 - **Chat about one PDF or the whole folder**, with citations that open the right PDF at the right page. See [Folders](#folders-study-a-whole-course).
 
 **Comfortable reading**
 
 - **Search** (`Ctrl+F`) across *all* pages, with result list and highlights. Forgiving: umlauts/accents, `ß`/`ss`, line breaks and hyphenation don't matter (`satze` finds `Sätze`). `Ctrl+Shift+F` searches all PDFs of the folder.
-- **Table of contents** from the PDF's bookmarks, with the current chapter highlighted.
-- **Page colours**: dark pages (black to dark grey background, light text), a warm tint from 6500 K down to 2500 K (presets *Warm*, *Sepia*, *Night*), and brightness, so white pages don't glare.
+- **Quick switcher** (`Ctrl+P`): jump straight to any PDF in your library or any note of the current PDF/folder.
+- **Unified sidebar & split-screen**: Library, table of contents (*Contents*) and highlights (*Marks*) live in one compact sidebar that turns into an overlay drawer on narrow windows.
+- **Clickable internal PDF links**: cross-references, table-of-contents links and footnotes inside the PDF jump straight to their target page (and `Alt+←` takes you back).
+- **App theme & page colours**: switch the app independently between *System*, *Light* and *Dark*, plus dark pages (black to dark grey background, light text), a warm tint from 6500 K down to 2500 K (presets *Warm*, *Sepia*, *Night*), and brightness, so white pages don't glare.
 
   <img src="docs/images/colours.webp" width="560" alt="Dark, warm-tinted page with the page colours menu open">
 
 - **Back and forward** (Alt+← / Alt+→): after following a page link, return to the exact spot you were reading, also in another PDF.
-- Zoom, fit to width, page jump, remembers your last page, resizable chat, dark mode follows your system.
+- Zoom (`Ctrl+Scroll`, `Ctrl+±`, `Ctrl+0`), fit to width, page jump, remembers your last page, resizable chat.
 
 **Your choice of assistant**
 
@@ -142,6 +144,8 @@ To find the right places quickly, ydust gives the tutor a map of every document 
 | `Ctrl/Cmd + K` | Ask about the current selection |
 | `Ctrl/Cmd + F` | Search in the document |
 | `Ctrl/Cmd + Shift + F` | Search in all PDFs of the folder |
+| `Ctrl/Cmd + P` | Quick switcher (PDFs and notes) |
+| `Ctrl/Cmd + +` / `-` / `0` | Zoom in / out / fit width (also `Ctrl + Scroll`) |
 | `Alt + ←` / `Alt + →` | Back to where you jumped from, forward again |
 | `S` | Snip a region of the page (when not typing) |
 | `Ctrl/Cmd + V` | Paste a picture into the chat |
@@ -163,6 +167,8 @@ To find the right places quickly, ydust gives the tutor a map of every document 
 - **Notes stay local** like everything else; the parts the assistant reads go to its provider, as above.
 - **No remote pictures.** Answers and notes never load pictures from the web (an image address could carry text out); a picture shows as a label instead.
 - **Local only.** The server listens on `127.0.0.1` and rejects requests from other websites and from other local web servers (only its own port and the dev server's are accepted, and request bodies must be JSON or uploads), so a web page you visit can't use it through your browser. It also can't be shown inside another site's frame. Keep it that way: the server drives an AI agent on your machine.
+- **Isolated iPad pairing.** When you click *Pair iPad*, ydust opens a separate temporary HTTP listener bound only to the single network interface IP you pick (default port `8788`, configurable via `YDUST_PAD_PORT`), gated by a 192-bit random token that rotates whenever you pair a different chat and automatically shuts down after 30 minutes without a connected iPad. Because pairing uses plain local HTTP, use it on a trusted home Wi-Fi or over Tailscale/WireGuard on untrusted networks. A paired tablet can only edit the paired scratchpad and trigger *Attach*, *Check Proof*, or *→ LaTeX* via your open PC tab (running the same read-only tutor/LaTeX conversion as clicking on the PC); it can never browse your library, delete files, or run arbitrary commands. Stop pairing at any time to close the port.
+- **Sandboxed LaTeX compilation.** Local PDF compilation runs `pdflatex` (or `tectonic`) inside a fresh temporary directory with `-no-shell-escape`, `openin_any=p`, `openout_any=p`, and a strict timeout so generated `.tex` cannot run commands or read/write files outside the temp folder.
 - **Shared computers** (e.g. a university lab): other users of the same computer could reach the server too. Start it with `YDUST_AUTH=1`: it then prints a sign-in link once at startup; open it once per browser, and every other request without that sign-in is refused.
 
 ## Configuration
@@ -176,6 +182,8 @@ Set these environment variables before starting, e.g. `PORT=9000 npm start` (Lin
 | `YDUST_DEV_PORT` | `5173` | Port of the dev web server, whose pages the API accepts |
 | `PORT` | `8787` | Port of the server (the dev web server stays on `5173`) |
 | `HOST` | `127.0.0.1` | Bind address. Keep it local (see [Privacy and security](#privacy-and-security)). |
+| `YDUST_PAD_PORT` | `8788` | LAN port used while *Pair iPad* is active |
+| `PDFLATEX_BIN` | `pdflatex` | Path to the local LaTeX compiler (`pdflatex`, `lualatex`, or `tectonic`) |
 | `AGY_BIN` | `agy` | Path to the Antigravity CLI |
 | `CLAUDE_BIN` | `claude` | Path to the Claude Code CLI |
 | `AGY_SETTINGS` | `~/.gemini/antigravity-cli/settings.json` | Where ydust reads Antigravity's default model |
@@ -281,9 +289,9 @@ library/
 
 - **Scanned PDFs** have no text layer: no text selection, search or highlights, and the tutor can't read them. Snipping works. OCR would help; region highlights (a box on the page) would be a way to mark scans.
 - **Web search** works with Claude only (see *How it works*); there is one click per search, no "allow all for this answer".
-- **Highlight colours under the *Night* tint**: the tint takes out blue light, so a blue highlight looks grey there (the list still shows its colour). Own labels per colour (e.g. *definition*, *exam*) would be nice.
+- **Highlight colours under the *Night* tint**: the tint takes out blue light, so a blue highlight looks grey there (the list still shows its colour).
 - **Dark pages** invert pictures too, so photos look like negatives.
-- **Drafts** are accepted as a whole; accepting single hunks or editing a draft before accepting it would be nice. A chat writes only into its own notes (a folder chat into the folder's notes).
+- **Drafts** can be edited as a whole before accepting; accepting single hunks would be nice. A chat writes only into its own notes (a folder chat into the folder's notes).
 - Ideas: flashcard export; approving tool use from the UI via `agy acp` (Agent Client Protocol).
 
 ## Disclaimer

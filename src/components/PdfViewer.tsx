@@ -2,8 +2,10 @@ import clsx from "clsx";
 import { MessageSquareText, StickyNote } from "lucide-react";
 import type { Highlight } from "../lib/api";
 import { HL_STYLE, barColor } from "../lib/highlightColors";
+import { usePageLabels } from "../hooks/usePageLabels";
+import { pageLabel } from "../lib/pageLabels";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { cleanSelection, pdfjs, type PageRect, type PDFDocumentProxy } from "../lib/pdf";
+import { cleanSelection, pageLinks, pdfjs, type PageRect, type PDFDocumentProxy, type PdfLink } from "../lib/pdf";
 import { rangeHighlights, selectionEnd, selectionHighlights, type HighlightRect } from "../lib/selection";
 import { findInLayer, occurrenceAt } from "../lib/textMatch";
 import { isTextSpan, lineOf, positionAt, posTop, wordAt, type TextPos } from "../lib/textSelect";
@@ -42,6 +44,10 @@ type Props = {
   onPageChange: (page: number) => void;
   onSelection: (sel: PdfSelection | null) => void;
   onScale: (scale: number) => void;
+  /** Ctrl/Cmd + wheel or pinch-to-zoom step. */
+  onZoomStep?: (dir: 1 | -1) => void;
+  /** Internal PDF link clicked (cross-reference, TOC, footnote). */
+  onInternalLink?: (page: number) => void;
   /** Box-select mode: drag a rectangle on a page to take a snapshot of it. */
   snipping: boolean;
   onSnip: (page: number, rect: PageRect) => void;
@@ -72,6 +78,8 @@ export function PdfViewer({
   onPageChange,
   onSelection,
   onScale,
+  onZoomStep,
+  onInternalLink,
   snipping,
   onSnip,
   search,
@@ -84,6 +92,7 @@ export function PdfViewer({
   userHighlights = EMPTY_HIGHLIGHTS,
   onHighlightClick,
 }: Props) {
+  const labels = usePageLabels().cite();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [sizes, setSizes] = useState<Size[] | null>(null);
   const [boxWidth, setBoxWidth] = useState(0);
@@ -162,6 +171,33 @@ export function PdfViewer({
   const ready = sizes !== null && boxWidth > 0;
 
   useEffect(() => onScale(scale), [scale, onScale]);
+
+  // Ctrl/Cmd + wheel (and trackpad pinch, which browsers report as ctrlKey wheel events) zooms.
+  const zoomStepRef = useRef(onZoomStep);
+  zoomStepRef.current = onZoomStep;
+  useEffect(() => {
+    const box = scrollRef.current;
+    if (!box) return;
+    let acc = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || !zoomStepRef.current) return;
+      e.preventDefault();
+      if (Math.sign(e.deltaY) !== Math.sign(acc)) acc = 0;
+      acc += e.deltaY;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => (acc = 0), 200);
+      if (Math.abs(acc) >= 40) {
+        zoomStepRef.current(acc < 0 ? 1 : -1);
+        acc = 0;
+      }
+    };
+    box.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      if (timer) clearTimeout(timer);
+      box.removeEventListener("wheel", onWheel);
+    };
+  }, []);
 
   // Initial position.
   const didInit = useRef(false);
@@ -452,6 +488,7 @@ export function PdfViewer({
               key={i}
               pdf={pdf}
               num={i + 1}
+              label={pageLabel(labels, i + 1)}
               size={s}
               scale={scale}
               root={scrollRef}
@@ -467,6 +504,8 @@ export function PdfViewer({
               flash={flash?.page === i + 1 ? flash : null}
               onReveal={reveal}
               onMarkClick={onMarkClick}
+              onInternalLink={onInternalLink}
+              labels={labels}
               pageFilter={pageFilter}
               tint={tint}
               darkPages={darkPages}
@@ -481,6 +520,7 @@ export function PdfViewer({
 const Page = memo(function Page({
   pdf,
   num,
+  label,
   size,
   scale,
   root,
@@ -496,12 +536,15 @@ const Page = memo(function Page({
   flash,
   onReveal,
   onMarkClick,
+  onInternalLink,
+  labels,
   pageFilter,
   tint,
   darkPages,
 }: {
   pdf: PDFDocumentProxy;
   num: number;
+  label: string;
   size: Size;
   scale: number;
   root: React.RefObject<HTMLDivElement | null>;
@@ -518,6 +561,8 @@ const Page = memo(function Page({
   flash: Flash | null;
   onReveal: (page: number, top: number, height: number) => void;
   onMarkClick: (messageId: string) => void;
+  onInternalLink?: (page: number) => void;
+  labels?: string[];
   pageFilter?: string;
   tint: string | null;
   darkPages: boolean;
@@ -532,6 +577,8 @@ const Page = memo(function Page({
   const [markBars, setMarkBars] = useState<{ id: string; bars: HighlightRect[] }[]>([]);
   const [flashBars, setFlashBars] = useState<HighlightRect[] | null>(null);
   const [userBars, setUserBars] = useState<{ h: Highlight; bars: HighlightRect[] }[]>([]);
+  const [links, setLinks] = useState<PdfLink[]>([]);
+  const [hoverLink, setHoverLink] = useState<PdfLink | null>(null);
   const revealed = useRef("");
 
   const layerEl = () => textHost.current?.querySelector<HTMLElement>(".textLayer") ?? null;
@@ -583,17 +630,40 @@ const Page = memo(function Page({
     );
   }, [userHighlights, textVersion, scale]);
 
-  /** A click (not a drag) on a highlight opens its menu. */
+  const linkAt = (clientX: number, clientY: number) => {
+    if (!links.length || !ref.current) return null;
+    const r = ref.current.getBoundingClientRect();
+    const x = clientX - r.left;
+    const y = clientY - r.top;
+    return links.find((l) => x >= l.left && x <= l.left + l.width && y >= l.top && y <= l.top + l.height) ?? null;
+  };
+
+  /** A click (not a drag) on a highlight opens its menu; else an internal PDF link jumps to its target page. */
   const onPageClick = (e: React.MouseEvent) => {
-    if (!onHighlightClick || !userBars.length || e.detail !== 1) return;
+    if (e.detail !== 1) return;
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) return;
-    const r = ref.current!.getBoundingClientRect();
-    const x = e.clientX - r.left;
-    const y = e.clientY - r.top;
-    // The most recent highlight on top.
-    const hit = [...userBars].reverse().find(({ bars }) => bars.some((b) => x >= b.left && x <= b.left + b.width && y >= b.top && y <= b.top + b.height));
-    if (hit) onHighlightClick({ id: hit.h.id, left: e.clientX, top: e.clientY + 14 });
+    if (onHighlightClick && userBars.length) {
+      const r = ref.current!.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      // The most recent highlight on top.
+      const hit = [...userBars].reverse().find(({ bars }) => bars.some((b) => x >= b.left && x <= b.left + b.width && y >= b.top && y <= b.top + b.height));
+      if (hit) {
+        onHighlightClick({ id: hit.h.id, left: e.clientX, top: e.clientY + 14 });
+        return;
+      }
+    }
+    if (onInternalLink) {
+      const hit = linkAt(e.clientX, e.clientY);
+      if (hit) onInternalLink(hit.page);
+    }
+  };
+
+  const onPageMouseMove = (e: React.MouseEvent) => {
+    if (snipping || !links.length) return;
+    const hit = linkAt(e.clientX, e.clientY);
+    setHoverLink((cur) => (cur === hit ? cur : hit));
   };
 
   // Flash a passage (clicked quote in the chat).
@@ -633,6 +703,8 @@ const Page = memo(function Page({
       // Free memory for pages far away from the viewport — but keep the text of pages that
       // hold part of the current selection, or the selection would break.
       host.replaceChildren();
+      setLinks([]);
+      setHoverLink(null);
       const sel = window.getSelection();
       if (!(sel && !sel.isCollapsed && sel.containsNode(textDiv, true))) {
         textDiv.replaceChildren();
@@ -669,6 +741,8 @@ const Page = memo(function Page({
       if (cancelled) return;
       host.replaceChildren(canvas); // swap only when ready, so zooming doesn't flash
 
+      void pageLinks(pdf, page, viewport).then((found) => !cancelled && setLinks(found));
+
       // Text layer still there from before (same zoom)? Keep it, so a selection in it survives.
       if ((textDiv.firstElementChild as HTMLElement | null)?.dataset.scale === String(scale)) return;
       const fresh = document.createElement("div");
@@ -698,7 +772,10 @@ const Page = memo(function Page({
     <div
       ref={ref}
       data-page={num}
+      data-link-hover={hoverLink ? "true" : undefined}
       onClick={onPageClick}
+      onMouseMove={onPageMouseMove}
+      onMouseLeave={() => hoverLink && setHoverLink(null)}
       className="pdf-page relative isolate shrink-0 overflow-hidden rounded-sm shadow-[0_1px_3px_rgba(0,0,0,0.12),0_8px_24px_-12px_rgba(0,0,0,0.25)]"
       style={
         {
@@ -721,12 +798,9 @@ const Page = memo(function Page({
           )}
         </div>
       )}
-      {(markBars.length > 0 || hitBars.length > 0 || flashBars) && (
+      {(hitBars.length > 0 || flashBars) && (
         // Same trick as the selection: opaque colours + multiply keep the text crisp.
         <div className="pointer-events-none absolute inset-0 select-none mix-blend-multiply">
-          {markBars.flatMap((m) =>
-            m.bars.map((b, i) => <div key={`${m.id}-${i}`} className="absolute rounded-[2px] bg-amber-100" style={b} />),
-          )}
           {hitBars.flatMap((bars, n) =>
             bars.map((b, i) => (
               <div
@@ -749,6 +823,30 @@ const Page = memo(function Page({
       )}
       </div>
       {tint && <div className="pointer-events-none absolute inset-0 select-none mix-blend-multiply" style={{ backgroundColor: tint }} />}
+      {markBars.length > 0 && (
+        // Subtle dotted underline so discussed passages never visually clash with yellow/orange highlights.
+        <div className="pointer-events-none absolute inset-0 select-none">
+          {markBars.flatMap((m) =>
+            m.bars.map((b, i) => (
+              <div
+                key={`${m.id}-${i}`}
+                className="absolute border-b-2 border-dotted border-amber-500/80 dark:border-amber-400/80"
+                style={b}
+              />
+            )),
+          )}
+        </div>
+      )}
+      {hoverLink && (
+        <div
+          className="pointer-events-none absolute rounded-[2px] bg-violet-500/15 ring-1 ring-violet-500/40"
+          style={{ left: hoverLink.left, top: hoverLink.top, width: hoverLink.width, height: hoverLink.height }}
+        >
+          <span className="absolute -top-5 left-0 rounded bg-zinc-900/90 px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap text-white shadow-sm dark:bg-zinc-100 dark:text-zinc-900">
+            p. {pageLabel(labels, hoverLink.page)}
+          </span>
+        </div>
+      )}
       <div ref={textHost} className="absolute inset-0" />
       {markBars.map((m) => (
         <button
@@ -783,7 +881,7 @@ const Page = memo(function Page({
         ))}
       {snipping && <SnipOverlay scale={scale} onSnip={(r) => onSnip(num, r)} />}
       <span className="pointer-events-none absolute right-2 bottom-1.5 text-[10px] font-medium text-zinc-400 select-none">
-        {num}
+        {label}
       </span>
     </div>
   );

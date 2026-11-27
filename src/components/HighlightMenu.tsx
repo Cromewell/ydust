@@ -3,7 +3,7 @@ import { NotebookPen, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { usePageLabels } from "../hooks/usePageLabels";
 import { HL_COLORS, type Highlight, type HlColor } from "../lib/api";
-import { HL_STYLE } from "../lib/highlightColors";
+import { HL_STYLE, hlLabel, type HighlightLabels } from "../lib/highlightColors";
 import { pageLabel } from "../lib/pageLabels";
 import type { Anchor } from "./NotePicker";
 
@@ -11,6 +11,7 @@ import type { Anchor } from "./NotePicker";
 export function HighlightMenu({
   h,
   anchor,
+  colorLabels,
   onColor,
   onComment,
   onAsk,
@@ -20,6 +21,7 @@ export function HighlightMenu({
 }: {
   h: Highlight;
   anchor: Anchor;
+  colorLabels?: HighlightLabels;
   onColor: (c: HlColor) => void;
   onComment: (comment: string) => void;
   onAsk: () => void;
@@ -65,21 +67,27 @@ export function HighlightMenu({
       style={pos}
     >
       <div className="flex items-center gap-1.5 px-1.5 pt-1 pb-2" role="radiogroup" aria-label="Colour">
-        {HL_COLORS.map((c) => (
-          <button
-            key={c}
-            role="radio"
-            aria-checked={h.color === c}
-            aria-label={HL_STYLE[c].label}
-            onClick={() => onColor(c)}
-            className={clsx(
-              "size-5 rounded-full border border-black/10 transition hover:scale-110 dark:border-white/20",
-              h.color === c && "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white dark:ring-zinc-400 dark:ring-offset-zinc-900",
-            )}
-            style={{ backgroundColor: HL_STYLE[c].dot }}
-          />
-        ))}
-        <span className="ml-auto text-[11px] text-zinc-400">p. {label}</span>
+        {HL_COLORS.map((c) => {
+          const name = hlLabel(c, colorLabels);
+          return (
+            <button
+              key={c}
+              role="radio"
+              aria-checked={h.color === c}
+              aria-label={name}
+              title={name}
+              onClick={() => onColor(c)}
+              className={clsx(
+                "size-5 rounded-full border border-black/10 transition hover:scale-110 dark:border-white/20",
+                h.color === c && "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white dark:ring-zinc-400 dark:ring-offset-zinc-900",
+              )}
+              style={{ backgroundColor: HL_STYLE[c].dot }}
+            />
+          );
+        })}
+        <span className="ml-auto truncate text-[11px] text-zinc-400" title={`Page ${label}`}>
+          {colorLabels?.[h.color] ? `${colorLabels[h.color]} · ` : ""}p. {label}
+        </span>
       </div>
       <textarea
         value={comment}

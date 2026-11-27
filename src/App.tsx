@@ -5,10 +5,9 @@ import {
   Camera,
   Check,
   FileUp,
-  Highlighter,
-  ListTree,
   Loader2,
   Maximize2,
+  MessageSquareText,
   Minus,
   PanelLeft,
   PanelRight,
@@ -21,22 +20,25 @@ import { ChatPanel, type Attachment, type ChatPanelHandle, type PanelTab, type S
 import { ApprovalDialog } from "./components/ApprovalDialog";
 import { HighlightMenu } from "./components/HighlightMenu";
 import { HighlightsPanel, SideTabs, type SideTab } from "./components/HighlightsPanel";
+import { LatexModal } from "./components/LatexModal";
 import { NotePicker, type Anchor } from "./components/NotePicker";
 import type { OpenNote } from "./components/NotesPanel";
 import { OutlinePanel } from "./components/OutlinePanel";
 import { PdfViewer, type Flash, type Mark, type PdfSelection, type Zoom } from "./components/PdfViewer";
+import { QuickSwitcher } from "./components/QuickSwitcher";
 import { SearchBar } from "./components/SearchBar";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { Sidebar } from "./components/Sidebar";
-import { api, ask, type Approval, type AskMode, type Chat, type Highlight, type HlColor, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type ProviderInfo, type Quote } from "./lib/api";
+import { api, ask, type Approval, type AskMode, type Chat, type Highlight, type HlColor, type ChatTarget, type DocMeta, type DocSummary, type FolderSummary, type Message, type MessageDraft, type NoteOwner, type PadActionEvent, type ProviderInfo, type Quote } from "./lib/api";
 import { downloadText, highlightsMarkdown, questionOf, safeFilename } from "./lib/export";
+import type { HighlightLabels } from "./lib/highlightColors";
 import { citationsFor, insertIntoNote, noteEditor, pageLink, quoteForNote, sameOwner } from "./lib/notes";
 import { nearestPage, pageLabel, relabelCitations, type PageLabels } from "./lib/pageLabels";
 import { NO_HISTORY, leave, step, type Spot } from "./lib/navHistory";
 import { splitEffort } from "./lib/effort";
 import { choose } from "./lib/models";
-import { pageFilter, parseAppearance, tintColor, type PdfAppearance } from "./lib/appearance";
-import type { TextSize } from "./lib/settings";
+import { applyTheme, pageFilter, parseAppearance, parseTheme, tintColor, type AppTheme, type PdfAppearance } from "./lib/appearance";
+import { SIZE_CLASSES, type TextSize } from "./lib/settings";
 import { loadPdf, renderRegion, type PageRect, type PDFDocumentProxy } from "./lib/pdf";
 import { store } from "./lib/storage";
 import { useChatWidth } from "./hooks/useChatWidth";
@@ -111,13 +113,30 @@ export default function App() {
   const [webOn, setWebOn] = useState(false);
   const [approvals, setApprovals] = useState<{ target: ChatTarget; via: string; a: Approval }[]>([]);
 
-  const [showOutline, setShowOutline] = useState(() => store.get("outline") === "1");
-  const [sideTab, setSideTab] = useState<SideTab>(() => (store.get("sideTab") === "highlights" ? "highlights" : "contents"));
+  const [sideTab, setSideTab] = useState<SideTab>(() => {
+    const s = store.get("sideTab");
+    return s === "contents" || s === "highlights" ? s : "library";
+  });
+  const [quickOpen, setQuickOpen] = useState(false);
 
   const [showMarks, setShowMarks] = useState(() => store.get("marks") !== "0");
+  const [theme, setThemeState] = useState<AppTheme>(() => parseTheme(store.get("theme")));
+  const setTheme = useCallback((t: AppTheme) => {
+    setThemeState(t);
+    store.set("theme", t);
+  }, []);
+  useEffect(() => {
+    applyTheme(theme);
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyTheme("system");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [theme]);
   const [appearance, setAppearance] = useState<PdfAppearance>(() => parseAppearance(store.get("appearance")));
   const pagesFilter = pageFilter(appearance);
   const pagesTint = tintColor(appearance.kelvin);
+  const [colorLabels, setColorLabels] = useState<HighlightLabels>({});
   const [flashTarget, setFlashTarget] = useState<Flash | null>(null);
 
   const search = useDocSearch(doc, page);
@@ -125,7 +144,10 @@ export default function App() {
   const [searchFolder, setSearchFolder] = useState(false);
   const folderSearch = useFolderSearch(activeFolder?.id ?? null, search.query, search.open && searchFolder);
   const forgetPageTexts = search.forget;
-  const [textSize, setTextSize] = useState<TextSize>(() => (store.get("textSize") as TextSize | null) ?? "s");
+  const [textSize, setTextSize] = useState<TextSize>(() => {
+    const saved = store.get("textSize");
+    return saved && Object.hasOwn(SIZE_CLASSES, saved) ? (saved as TextSize) : "s";
+  });
 
   const [attachments, setAttachmentsState] = useState<Attachment[]>([]);
   // Mirror in a ref so quick successive pastes/snips see the latest list.
@@ -138,19 +160,41 @@ export default function App() {
   const [snipped, setSnipped] = useState<Attachment | null>(null); // "take another or done?" card
 
 
-  const [showSidebar, setShowSidebar] = useState(true);
+  const [narrow, setNarrow] = useState(() => window.innerWidth < 1024);
+  const [showSidebar, setShowSidebar] = useState(() => window.innerWidth >= 1024);
+  useEffect(() => {
+    const onResize = () => {
+      const isNarrow = window.innerWidth < 1024;
+      setNarrow((was) => {
+        if (isNarrow && !was) setShowSidebar(false);
+        return isNarrow;
+      });
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [showChat, setShowChat] = useState(true);
-  const chatWidth = useChatWidth(showSidebar ? SIDEBAR_WIDTH : 0);
+  const chatWidth = useChatWidth(showSidebar && !narrow ? SIDEBAR_WIDTH : 0);
   const resizing = chatWidth.resizing;
   const [dragging, setDragging] = useState(false);
   const chatRef = useRef<ChatPanelHandle>(null);
 
-  // --- Notes: the Notes tab, the note open in it, and the "which note?" picker ---
-  const [panelTab, setPanelTabState] = useState<PanelTab>(() => (store.get("panelTab") === "notes" ? "notes" : "chat"));
+  // --- Notes & Pad: the Notes/Pad tabs, the note open in it, and the "which note?" picker ---
+  const [panelTab, setPanelTabState] = useState<PanelTab>(() => {
+    const saved = store.get("panelTab");
+    return saved === "notes" || saved === "pad" ? saved : "chat";
+  });
   const setPanelTab = useCallback((t: PanelTab) => {
     setPanelTabState(t);
     store.set("panelTab", t);
   }, []);
+  const [latexModal, setLatexModal] = useState<{
+    title: string;
+    converting: boolean;
+    fixing: boolean;
+    convertError: string | null;
+    tex: string;
+  } | null>(null);
   const [openNote, setOpenNote] = useState<OpenNote | null>(null);
   const [notesRefresh, setNotesRefresh] = useState(0);
   /** A question to send once its chat is on screen (see reviewNote). */
@@ -187,7 +231,26 @@ export default function App() {
         setProvider((cur) => (list.find((p) => p.id === cur)?.available ? cur : (list.find((p) => p.available)?.id ?? cur)));
       })
       .catch(() => {});
+    api
+      .getHighlightLabels()
+      .then((l) => setColorLabels(l as HighlightLabels))
+      .catch(() => {});
   }, [flash]);
+
+  const saveColorLabels = useCallback(
+    async (next: HighlightLabels) => {
+      const prev = colorLabels;
+      setColorLabels(next);
+      try {
+        const saved = await api.saveHighlightLabels(next as Record<string, string>);
+        setColorLabels(saved as HighlightLabels);
+      } catch (e) {
+        setColorLabels(prev);
+        flash(`Could not save labels: ${(e as Error).message}`);
+      }
+    },
+    [colorLabels, flash],
+  );
 
   // --- Text extraction: document.txt + outline.txt, so the agent can read every document ---
   const { progress, extract: indexDoc } = useTextExtraction(docs, activeId, (s) => {
@@ -296,13 +359,17 @@ export default function App() {
   );
 
   const remove = async (id: string) => {
-    await api.remove(id).catch((e) => flash(e.message));
-    setFolders((list) => list.map((f) => (f.docIds.includes(id) ? { ...f, docIds: f.docIds.filter((d) => d !== id) } : f)));
-    setDocs((list) => {
-      const next = list.filter((d) => d.id !== id);
-      if (id === activeId) setActiveId(next[0]?.id ?? null);
-      return next;
-    });
+    try {
+      await api.remove(id);
+      setFolders((list) => list.map((f) => (f.docIds.includes(id) ? { ...f, docIds: f.docIds.filter((d) => d !== id) } : f)));
+      setDocs((list) => {
+        const next = list.filter((d) => d.id !== id);
+        if (id === activeId) setActiveId(next[0]?.id ?? null);
+        return next;
+      });
+    } catch (e) {
+      flash((e as Error).message);
+    }
   };
 
   const rename = async (id: string, name: string) => {
@@ -359,6 +426,24 @@ export default function App() {
         }),
       );
     } catch (e) {
+      flash((e as Error).message);
+    }
+  };
+
+  const reorderFolder = async (folderId: string, docIds: string[]) => {
+    let prev: string[] | null = null;
+    setFolders((list) =>
+      list.map((f) => {
+        if (f.id !== folderId) return f;
+        prev = f.docIds;
+        return { ...f, docIds };
+      }),
+    );
+    try {
+      const saved = await api.patchFolder(folderId, { docIds });
+      setFolders((list) => list.map((f) => (f.id === folderId ? saved : f)));
+    } catch (e) {
+      if (prev) setFolders((list) => list.map((f) => (f.id === folderId ? { ...f, docIds: prev! } : f)));
       flash((e as Error).message);
     }
   };
@@ -536,6 +621,8 @@ export default function App() {
         web?: boolean;
         /** One of the app's built-in English prompts (Explain, a starter, …): the answer follows the document's language. */
         preset?: boolean;
+        /** Already uploaded server image ids (e.g. when retrying a failed turn). */
+        existingImages?: string[];
       } = {},
     ) => {
       if (!target || abortRef.current) return;
@@ -548,10 +635,10 @@ export default function App() {
       abortRef.current = controller;
 
       // Upload pictures first (local, fast); keep them in the composer if that fails.
-      let imageIds: string[] = [];
+      let imageIds: string[] = opts.existingImages ? [...opts.existingImages] : [];
       if (withImages.length) {
         try {
-          imageIds = await Promise.all(withImages.map((a) => api.uploadImage(t, a.blob).then((r) => r.id)));
+          imageIds = [...imageIds, ...(await Promise.all(withImages.map((a) => api.uploadImage(t, a.blob).then((r) => r.id))))];
         } catch (e) {
           abortRef.current = null;
           flash(`Could not attach the picture: ${(e as Error).message}`);
@@ -670,6 +757,151 @@ export default function App() {
     [send],
   );
 
+  /** Repeat the question that led to a failed, stopped or cut-off answer. */
+  const retryMessage = useCallback(
+    (messageId: string) => {
+      if (!chat) return;
+      const a = chat.messages.find((m) => m.id === messageId);
+      const q = a && questionOf(chat.messages, a);
+      if (!q) return;
+      if (q.secondOpinionOf) {
+        void send("Second opinion", null, [], { secondOpinionOf: q.secondOpinionOf, via: a.provider });
+        return;
+      }
+      void send(q.noteRef ? (q.noteRef.instructions ?? "") : q.content, q.quote ?? null, [], {
+        mode: q.mode,
+        note: q.noteRef ? { name: q.noteRef.name, lines: q.noteRef.lines } : undefined,
+        draft: q.draftRef ? { id: q.draftRef.id, target: q.draftRef.target, mode: "replace", summary: "", revision: q.draftRef.revision } : undefined,
+        web: q.web,
+        preset: q.preset,
+        existingImages: q.images,
+        via: a.provider,
+      });
+    },
+    [chat, send],
+  );
+
+  // --- Scratchpad, iPad actions & Handwriting → LaTeX / PDF ---
+  const CHECK_PROOF_PROMPT =
+    "Check my handwritten proof/calculation step by step. Tell me what is right, point out the first mistake or gap with a helpful hint, and do not give away the full solution yet.";
+  const latexAbortRef = useRef<AbortController | null>(null);
+
+  const closeLatexModal = useCallback(() => {
+    latexAbortRef.current?.abort();
+    latexAbortRef.current = null;
+    setLatexModal(null);
+  }, []);
+
+  const startLatexConvert = useCallback(
+    async (images: string[], title: string) => {
+      latexAbortRef.current?.abort();
+      const ctrl = new AbortController();
+      latexAbortRef.current = ctrl;
+      setLatexModal({ title, converting: true, fixing: false, convertError: null, tex: "" });
+      try {
+        const res = await api.convertLatex(
+          {
+            provider,
+            model: model || undefined,
+            effort: effort || undefined,
+            language: language !== "auto" ? language : undefined,
+            title,
+            images,
+          },
+          ctrl.signal,
+        );
+        if (!ctrl.signal.aborted) setLatexModal((m) => (m ? { ...m, converting: false, tex: res.tex } : null));
+      } catch (e) {
+        if (!ctrl.signal.aborted) setLatexModal((m) => (m ? { ...m, converting: false, convertError: (e as Error).message } : null));
+      } finally {
+        if (latexAbortRef.current === ctrl) latexAbortRef.current = null;
+      }
+    },
+    [provider, model, effort, language],
+  );
+
+  const fixLatexWithAi = useCallback(
+    async (tex: string, errorLog: string) => {
+      latexAbortRef.current?.abort();
+      const ctrl = new AbortController();
+      latexAbortRef.current = ctrl;
+      setLatexModal((m) => (m ? { ...m, fixing: true, convertError: null } : null));
+      try {
+        const res = await api.fixLatex(
+          {
+            provider,
+            model: model || undefined,
+            effort: effort || undefined,
+            tex,
+            errorLog,
+          },
+          ctrl.signal,
+        );
+        if (!ctrl.signal.aborted) setLatexModal((m) => (m ? { ...m, fixing: false, tex: res.tex } : null));
+      } catch (e) {
+        if (!ctrl.signal.aborted) setLatexModal((m) => (m ? { ...m, fixing: false, convertError: (e as Error).message } : null));
+      } finally {
+        if (latexAbortRef.current === ctrl) latexAbortRef.current = null;
+      }
+    },
+    [provider, model, effort],
+  );
+
+  const attachSheet = useCallback(
+    (blob: Blob, label: string) => {
+      if (!addAttachment(blob, label)) return;
+      setShowChat(true);
+      setPanelTab("chat");
+      requestAnimationFrame(() => chatRef.current?.focus());
+    },
+    [addAttachment, setPanelTab],
+  );
+
+  const checkSheet = useCallback(
+    (blob: Blob, label: string) => {
+      const a: Attachment = { key: crypto.randomUUID(), blob, url: URL.createObjectURL(blob), label };
+      void send(CHECK_PROOF_PROMPT, null, [a], { mode: "check", preset: true });
+    },
+    [send],
+  );
+
+  const handlePadAction = useCallback(
+    async (ev: PadActionEvent) => {
+      if (!target || target.kind !== ev.kind || target.id !== ev.chatId) return;
+      const url = api.imageUrl(target, ev.imageId);
+      if (ev.action === "check" && !abortRef.current) {
+        flash("Checking handwritten sheet from iPad…");
+        void send(CHECK_PROOF_PROMPT, null, [], { mode: "check", preset: true, existingImages: [ev.imageId] });
+        return;
+      }
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const blob = await res.blob();
+        if (ev.action === "check") {
+          // Rare race window where the PC turn started/finished milliseconds around the server check:
+          // attach instead of silently dropping the sheet.
+          attachSheet(blob, ev.label);
+          flash("Tutor is busy — attached iPad sheet to composer instead");
+        } else if (ev.action === "attach") {
+          attachSheet(blob, ev.label);
+          flash(`Attached ${ev.label} from iPad`);
+        } else if (ev.action === "latex") {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(new Error("Could not read image from iPad."));
+            reader.readAsDataURL(blob);
+          });
+          void startLatexConvert([dataUrl], ev.label);
+        }
+      } catch (e) {
+        flash(`iPad action failed: ${(e as Error).message}`);
+      }
+    },
+    [target, flash, send, attachSheet, startLatexConvert],
+  );
+
   /** "Insert into note" on an answer: its question as a heading, the passage it was about, the answer. */
   const insertAnswer = useCallback(
     (messageId: string, anchor: Anchor) => {
@@ -741,20 +973,6 @@ export default function App() {
     [streaming, targetKey, flash],
   );
   const proposeFixes = useCallback((name: string) => void send("", null, [], { mode: "fix-note", note: { name } }), [send]);
-
-  const updateMessage = useCallback(
-    async (messageId: string, patch: { pinned?: boolean; note?: string }) => {
-      if (!target) return;
-      const t = target;
-      setChat((c) => (c && chatKeyOf(c) === chatKeyOf(t) ? { ...c, messages: c.messages.map((m) => (m.id === messageId ? { ...m, ...patch } : m)) } : c));
-      try {
-        await api.patchMessage(t, messageId, patch);
-      } catch (e) {
-        flash(`Could not save: ${(e as Error).message}`);
-      }
-    },
-    [target, flash], // eslint-disable-line react-hooks/exhaustive-deps
-  );
 
   // --- Discussed passages (quotes of earlier questions) + jumping to a quoted passage ---
   const marks = useMemo<Mark[]>(
@@ -912,12 +1130,24 @@ export default function App() {
     return () => window.removeEventListener("paste", onPaste);
   }, [chat, addAttachment]);
 
-  // Shortcuts: Ctrl/Cmd+K asks about the selection, S snips, Escape cancels.
+  const zoomBy = useCallback(
+    (dir: 1 | -1) => {
+      const i = ZOOM_STEPS.findIndex((z) => z >= scale - 0.001);
+      const next = dir > 0 ? ZOOM_STEPS.find((z) => z > scale + 0.001) : [...ZOOM_STEPS].reverse().find((z) => z < scale - 0.001);
+      setZoom(next ?? ZOOM_STEPS[Math.max(0, i)]);
+    },
+    [scale],
+  );
+
+  // Shortcuts: Ctrl/Cmd+K asks about selection, Ctrl/Cmd+P quick switcher, Ctrl/Cmd+±/0 zoom, S snips, Escape cancels.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         askAboutSelection();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        setQuickOpen((v) => !v);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && pdf) {
         // Our search knows every page (the browser's only sees the rendered ones).
         e.preventDefault();
@@ -925,6 +1155,15 @@ export default function App() {
         if (sel && sel.length < 80) search.setQuery(sel.replace(/\s+/g, " "));
         setSearchFolder(e.shiftKey);
         search.show();
+      } else if ((e.ctrlKey || e.metaKey) && !e.altKey && pdf && (e.key === "+" || e.key === "=")) {
+        e.preventDefault();
+        zoomBy(1);
+      } else if ((e.ctrlKey || e.metaKey) && !e.altKey && pdf && e.key === "-") {
+        e.preventDefault();
+        zoomBy(-1);
+      } else if ((e.ctrlKey || e.metaKey) && !e.altKey && pdf && e.key === "0") {
+        e.preventDefault();
+        setZoom("fit");
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight") && !isTyping(e.target)) {
         e.preventDefault(); // not the browser's own back: it would leave ydust
         travel(e.key === "ArrowLeft" ? "back" : "forward");
@@ -942,13 +1181,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [askAboutSelection, selection, snipping, snipped, startSnip, finishSnipping, pdf, travel]);
-
-  const zoomBy = (dir: 1 | -1) => {
-    const i = ZOOM_STEPS.findIndex((z) => z >= scale - 0.001);
-    const next = dir > 0 ? ZOOM_STEPS.find((z) => z > scale + 0.001) : [...ZOOM_STEPS].reverse().find((z) => z < scale - 0.001);
-    setZoom(next ?? ZOOM_STEPS[Math.max(0, i)]);
-  };
+  }, [askAboutSelection, selection, snipping, snipped, startSnip, finishSnipping, pdf, travel, zoomBy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drag & drop PDFs anywhere.
   useEffect(() => {
@@ -986,46 +1219,108 @@ export default function App() {
         resizing && "cursor-col-resize select-none",
       )}
     >
+      {showSidebar && narrow && (
+        <div className="fixed inset-0 z-30 bg-zinc-950/35 backdrop-blur-[1px]" onClick={() => setShowSidebar(false)} />
+      )}
       {showSidebar && (
-        <div className="w-64 shrink-0 border-r border-zinc-200 dark:border-zinc-800">
-          <Sidebar
-            docs={docs}
-            folders={folders}
-            activeId={activeId}
-            uploading={uploading}
-            indexing={new Set(Object.keys(progress))}
-            onSelect={(id) => {
-              if (id !== activeId) remember();
-              setActiveId(id);
-            }}
-            onUpload={(files, folderId) => void upload(files, folderId)}
-            onDelete={remove}
-            onRename={rename}
-            onCreateFolder={createFolder}
-            onRenameFolder={renameFolder}
-            onDeleteFolder={removeFolder}
-            onMove={moveDoc}
-          />
+        <div
+          className={clsx(
+            "flex h-full shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950",
+            narrow ? "fixed inset-y-0 left-0 z-40 w-72 shadow-2xl" : "w-64",
+          )}
+        >
+          <div className="flex h-12 shrink-0 items-center gap-2 border-b border-zinc-200/70 px-3 dark:border-zinc-800/70">
+            <img src="/favicon.svg" alt="" className="size-6" />
+            <span className="flex-1 text-[15px] font-semibold tracking-tight">ydust</span>
+            <button
+              type="button"
+              onClick={() => setQuickOpen(true)}
+              className="rounded-md border border-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400 transition hover:border-zinc-300 hover:text-zinc-700 dark:border-zinc-800 dark:hover:border-zinc-700 dark:hover:text-zinc-200"
+              title="Quick switcher (Ctrl+P)"
+            >
+              Ctrl+P
+            </button>
+          </div>
+          {(() => {
+            const activeTab: SideTab = pdf && doc ? sideTab : "library";
+            const header = (
+              <SideTabs
+                tab={activeTab}
+                onTab={(t) => {
+                  setSideTab(t);
+                  store.set("sideTab", t);
+                }}
+                hasDoc={!!(pdf && doc)}
+                count={highlights.length}
+                onClose={narrow ? () => setShowSidebar(false) : undefined}
+              />
+            );
+            return (
+              <div className="min-h-0 flex-1">
+                {activeTab === "contents" && pdf && doc ? (
+                  <OutlinePanel
+                    pdf={pdf}
+                    page={page}
+                    onJump={(p) => {
+                      jumpTo(p);
+                      if (narrow) setShowSidebar(false);
+                    }}
+                    onClose={() => setShowSidebar(false)}
+                    header={header}
+                  />
+                ) : activeTab === "highlights" && pdf && doc ? (
+                  <HighlightsPanel
+                    highlights={highlights}
+                    header={header}
+                    colorLabels={colorLabels}
+                    onColorLabels={(l) => void saveColorLabels(l)}
+                    onOpen={(h) => {
+                      openAt(doc.id, h.page, h.text);
+                      if (narrow) setShowSidebar(false);
+                    }}
+                    onExport={(list) => downloadText(`${safeFilename(doc.name)} - highlights.md`, highlightsMarkdown(doc.name, list, pageLabels.cite(), colorLabels))}
+                    onCopyToNote={(list, anchor) =>
+                      toNote(anchor, `Copy ${list.length} highlight${list.length === 1 ? "" : "s"} into…`, (owner) => list.map((h) => highlightBlock(h, owner)).join("\n\n"))
+                    }
+                  />
+                ) : (
+                  <Sidebar
+                    docs={docs}
+                    folders={folders}
+                    activeId={activeId}
+                    uploading={uploading}
+                    indexing={new Set(Object.keys(progress))}
+                    header={header}
+                    onSelect={(id) => {
+                      if (id !== activeId) remember();
+                      setActiveId(id);
+                      if (narrow) setShowSidebar(false);
+                    }}
+                    onUpload={(files, folderId) => void upload(files, folderId)}
+                    onDelete={remove}
+                    onRename={rename}
+                    onCreateFolder={createFolder}
+                    onRenameFolder={renameFolder}
+                    onDeleteFolder={removeFolder}
+                    onMove={moveDoc}
+                    onReorderFolder={reorderFolder}
+                  />
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
       <main className="flex min-w-0 flex-1 flex-col">
         <div className="flex h-12 shrink-0 items-center gap-1 border-b border-zinc-200 px-2 dark:border-zinc-800">
-          <button onClick={() => setShowSidebar((v) => !v)} className="icon-btn" title="Toggle library">
+          <button
+            onClick={() => setShowSidebar((v) => !v)}
+            className={clsx("icon-btn", showSidebar && "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100")}
+            title="Toggle sidebar (Library, Contents, Marks)"
+          >
             <PanelLeft className="size-4" />
           </button>
-          {pdf && (
-            <button
-              onClick={() => {
-                setShowOutline((v) => !v);
-                store.set("outline", showOutline ? "0" : "1");
-              }}
-              className={clsx("icon-btn", showOutline && "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100")}
-              title="Contents and highlights"
-            >
-              <ListTree className="size-4" />
-            </button>
-          )}
           {(nav.back.length > 0 || nav.forward.length > 0) && (
             <>
               <button onClick={() => travel("back")} disabled={!pdf || !canGo("back")} className="icon-btn" title="Back to where you were (Alt+←)" aria-label="Back">
@@ -1047,17 +1342,17 @@ export default function App() {
             <>
               <PageInput page={page} total={pdf.numPages} labels={pageLabels.cite()} onGo={jumpTo} />
               <div className="mx-1 h-5 w-px bg-zinc-200 dark:bg-zinc-800" />
-              <button onClick={() => zoomBy(-1)} className="icon-btn" title="Zoom out">
+              <button onClick={() => zoomBy(-1)} className="icon-btn" title="Zoom out (Ctrl+−)">
                 <Minus className="size-4" />
               </button>
               <span className="w-11 text-center text-xs text-zinc-500 tabular-nums">{Math.round(scale * 100)}%</span>
-              <button onClick={() => zoomBy(1)} className="icon-btn" title="Zoom in">
+              <button onClick={() => zoomBy(1)} className="icon-btn" title="Zoom in (Ctrl++)">
                 <Plus className="size-4" />
               </button>
               <button
                 onClick={() => setZoom("fit")}
                 className={clsx("icon-btn", zoom === "fit" && "text-violet-600 dark:text-violet-400")}
-                title="Fit width"
+                title="Fit width (Ctrl+0)"
               >
                 <Maximize2 className="size-4" />
               </button>
@@ -1071,13 +1366,14 @@ export default function App() {
               </button>
               <button
                 onClick={() => {
-                  setShowMarks((v) => !v);
-                  store.set("marks", showMarks ? "0" : "1");
+                  const next = !showMarks;
+                  setShowMarks(next);
+                  store.set("marks", next ? "1" : "0");
                 }}
                 className={clsx("icon-btn", showMarks && "text-amber-600 dark:text-amber-400")}
-                title={showMarks ? "Hide passages you asked about" : "Highlight passages you asked about"}
+                title={showMarks ? "Hide passages you asked about in the chat" : "Show passages you asked about in the chat"}
               >
-                <Highlighter className="size-4" />
+                <MessageSquareText className="size-4" />
               </button>
               <AppearanceMenu
                 value={appearance}
@@ -1085,6 +1381,8 @@ export default function App() {
                   setAppearance(a);
                   store.set("appearance", JSON.stringify(a));
                 }}
+                theme={theme}
+                onTheme={setTheme}
               />
               <button
                 onClick={() => (snipping ? setSnipping(false) : startSnip())}
@@ -1101,40 +1399,6 @@ export default function App() {
         </div>
 
         <div className={clsx("flex min-h-0 flex-1", resizing && "pointer-events-none")}>
-        {showOutline && pdf && doc && (
-          <div className="w-64 shrink-0 border-r border-zinc-200 dark:border-zinc-800">
-            {(() => {
-              const close = () => {
-                setShowOutline(false);
-                store.set("outline", "0");
-              };
-              const header = (
-                <SideTabs
-                  tab={sideTab}
-                  onTab={(t) => {
-                    setSideTab(t);
-                    store.set("sideTab", t);
-                  }}
-                  count={highlights.length}
-                  onClose={close}
-                />
-              );
-              return sideTab === "contents" ? (
-                <OutlinePanel pdf={pdf} page={page} onJump={jumpTo} onClose={close} header={header} />
-              ) : (
-                <HighlightsPanel
-                  highlights={highlights}
-                  header={header}
-                  onOpen={(h) => openAt(doc.id, h.page, h.text)}
-                  onExport={(list) => downloadText(`${safeFilename(doc.name)} - highlights.md`, highlightsMarkdown(doc.name, list, pageLabels.cite()))}
-                  onCopyToNote={(list, anchor) =>
-                    toNote(anchor, `Copy ${list.length} highlight${list.length === 1 ? "" : "s"} into…`, (owner) => list.map((h) => highlightBlock(h, owner)).join("\n\n"))
-                  }
-                />
-              );
-            })()}
-          </div>
-        )}
         <div className="relative min-h-0 min-w-0 flex-1">
           {search.open && pdf && doc && (
             <SearchBar
@@ -1232,6 +1496,8 @@ export default function App() {
               onSelection={setSelection}
               position={viewPosition}
               onScale={setScale}
+              onZoomStep={zoomBy}
+              onInternalLink={jumpTo}
               snipping={snipping}
               onSnip={handleSnip}
               search={search.state}
@@ -1253,12 +1519,28 @@ export default function App() {
         <div className="relative shrink-0 border-l border-zinc-200 dark:border-zinc-800" style={{ width: chatWidth.width }}>
           <div
             role="separator"
+            tabIndex={0}
             aria-orientation="vertical"
             aria-label="Resize chat"
+            aria-valuemin={chatWidth.min}
+            aria-valuemax={Math.round(chatWidth.max)}
+            aria-valuenow={Math.round(chatWidth.width)}
             title="Drag to resize · double-click to reset"
             onPointerDown={chatWidth.startResize}
             onDoubleClick={chatWidth.reset}
-            className="group absolute inset-y-0 -left-1.5 z-30 w-3 cursor-col-resize"
+            onKeyDown={(e) => {
+              if (e.key === "ArrowLeft") {
+                e.preventDefault();
+                chatWidth.nudge(24);
+              } else if (e.key === "ArrowRight") {
+                e.preventDefault();
+                chatWidth.nudge(-24);
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                chatWidth.reset();
+              }
+            }}
+            className="group absolute inset-y-0 -left-1.5 z-30 w-3 cursor-col-resize outline-none focus-visible:[&>div]:bg-violet-500"
           >
             <div
               className={clsx(
@@ -1320,6 +1602,7 @@ export default function App() {
             checkMode={checkMode}
             onCheckMode={setCheckMode}
             onSecondOpinion={secondOpinion}
+            onRetry={retryMessage}
             tab={panelTab}
             onTab={setPanelTab}
             noteOwners={noteOwners}
@@ -1332,8 +1615,6 @@ export default function App() {
             onOpenChatNote={openChatNote}
             onReviewNote={(o, n, m, l) => void reviewNote(o, n, m, l)}
             onProposeFixes={proposeFixes}
-            onPin={(mid, pinned) => void updateMessage(mid, { pinned })}
-            onNote={(mid, note) => void updateMessage(mid, { note })}
             onLanguage={(l) => {
               setLanguage(l);
               store.set("lang", l);
@@ -1342,6 +1623,11 @@ export default function App() {
               setTextSize(t);
               store.set("textSize", t);
             }}
+            onAttachSheet={attachSheet}
+            onCheckSheet={checkSheet}
+            onConvertLatex={(images, title) => void startLatexConvert(images, title)}
+            onPadAction={(ev) => void handlePadAction(ev)}
+            onFlash={flash}
           />
         </div>
       )}
@@ -1364,6 +1650,7 @@ export default function App() {
           })()}
           onHighlight={doc?.hasText ? (c) => void highlightSelection(c) : null}
           lastColor={hl.color}
+          colorLabels={colorLabels}
           onAddToNote={(anchor) => {
             const q = takeSelection();
             const from = doc && docs.find((d) => d.id === doc.id);
@@ -1383,6 +1670,7 @@ export default function App() {
               key={h.id}
               h={h}
               anchor={hl.menu}
+              colorLabels={colorLabels}
               onClose={() => hl.setMenu(null)}
               onColor={(color) => void hl.change(h.id, { color })}
               onComment={(comment) => void hl.change(h.id, { comment })}
@@ -1425,6 +1713,46 @@ export default function App() {
           title={picker.title}
           onClose={() => setPicker(null)}
           onPick={(owner, name, isNew) => addToNote(owner, name, picker.block(owner), isNew)}
+        />
+      )}
+
+      {latexModal && (
+        <LatexModal
+          title={latexModal.title}
+          converting={latexModal.converting}
+          convertError={latexModal.convertError}
+          tex={latexModal.tex}
+          onChangeTex={(tex) => setLatexModal((m) => (m ? { ...m, tex } : null))}
+          onFixWithAi={fixLatexWithAi}
+          fixing={latexModal.fixing}
+          folderName={activeFolder?.name ?? null}
+          folderId={activeFolder?.id ?? null}
+          onImported={(s) => {
+            setDocs((list) => [s, ...list]);
+            if (s.folderId) setFolders((list) => list.map((x) => (x.id === s.folderId ? { ...x, docIds: [...x.docIds, s.id] } : x)));
+            setActiveId(s.id);
+            flash(`Imported “${s.name}.pdf” into your library`);
+          }}
+          onClose={closeLatexModal}
+        />
+      )}
+
+      {quickOpen && (
+        <QuickSwitcher
+          docs={docs}
+          folders={folders}
+          activeDocId={activeId}
+          noteOwners={noteOwners}
+          onClose={() => setQuickOpen(false)}
+          onSelectDoc={(id) => {
+            if (id !== activeId) remember();
+            setActiveId(id);
+          }}
+          onSelectNote={(owner, name) => {
+            setOpenNote({ owner, name, nonce: Date.now() });
+            setPanelTab("notes");
+            setShowChat(true);
+          }}
         />
       )}
 

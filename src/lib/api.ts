@@ -144,6 +144,59 @@ export type NoteInfo = { name: string; size: number; updatedAt: string; title: s
 export type Note = NoteInfo & { content: string; version: string };
 export type SavedNote = NoteInfo & { version: string };
 
+/** Handwritten scratchpads (vector sheets synced with an optional paired iPad). */
+export type PaperStyle = "grid" | "dots" | "blank";
+export type StrokePoint = [number, number, number];
+export type Stroke = { id: string; color: string; width: number; tool?: "pen" | "eraser"; points: StrokePoint[] };
+export type SketchPage = { id: string; strokes: Stroke[] };
+export type Sketch = { id: string; title: string; paper: PaperStyle; pages: SketchPage[]; createdAt: string; updatedAt: string };
+export type SketchInfo = { id: string; title: string; paper: PaperStyle; pageCount: number; strokeCount: number; createdAt: string; updatedAt: string };
+export type SketchOp =
+  | { type: "add-strokes"; pageId: string; strokes: Stroke[] }
+  | { type: "remove-strokes"; pageId: string; strokeIds: string[] }
+  | { type: "add-page"; pageId?: string; page?: SketchPage }
+  | { type: "clear-page"; pageId: string }
+  | { type: "set-paper"; paper: PaperStyle };
+export type LanInterface = { ip: string; label: string };
+export type LanAddress = { ip: string; label: string; url: string };
+export type PadPairingStatus =
+  | { active: false; interfaces: LanInterface[] }
+  | {
+      active: true;
+      port: number;
+      bindHost: string;
+      token: string;
+      kind: "doc" | "folder";
+      chatId: string;
+      sketchId: string;
+      chatName: string;
+      clients: number;
+      url: string;
+      interfaces: LanInterface[];
+      urls: LanAddress[];
+    };
+export type PadActionEvent = {
+  actionId: string;
+  kind: "doc" | "folder";
+  chatId: string;
+  sketchId: string;
+  action: "attach" | "check" | "latex";
+  pageId: string;
+  pageIndex: number;
+  imageId: string;
+  label: string;
+};
+export type LatexStatus = { available: boolean; compiler: string | null };
+
+export class LatexCompileError extends Error {
+  constructor(
+    message: string,
+    readonly log: string,
+  ) {
+    super(message);
+  }
+}
+
 /** A save refused because the note changed meanwhile; `current` is what it holds now (null: deleted). */
 export class NoteConflict extends Error {
   constructor(
@@ -156,10 +209,19 @@ export class NoteConflict extends Error {
 
 const noteUrl = (o: ChatTarget, name: string) => `${chatBase(o)}/notes/${encodeURIComponent(name)}`;
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    throw new Error(body?.error ?? `${res.status} ${res.statusText}`);
+    throw new ApiError(body?.error ?? `${res.status} ${res.statusText}`, res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -192,7 +254,7 @@ export const api = {
   getFolder: (id: string) => fetch(`/api/folders/${id}`).then(json<FolderMeta>),
   searchFolder: (id: string, q: string, signal?: AbortSignal) => fetch(`/api/folders/${id}/search?q=${encodeURIComponent(q)}`, { signal }).then(json<FolderHits>),
   createFolder: (name: string) => fetch("/api/folders", send("POST", { name })).then(json<FolderSummary>),
-  patchFolder: (id: string, body: { name?: string }) => fetch(`/api/folders/${id}`, send("PATCH", body)).then(json<FolderSummary>),
+  patchFolder: (id: string, body: { name?: string; docIds?: string[] }) => fetch(`/api/folders/${id}`, send("PATCH", body)).then(json<FolderSummary>),
   removeFolder: (id: string) => fetch(`/api/folders/${id}`, send("DELETE")).then(json<{ ok: true }>),
 
   /** The chat's messages (a document's or a folder's). */
@@ -221,6 +283,8 @@ export const api = {
   patchHighlight: (docId: string, hid: string, body: { color?: HlColor; comment?: string }) =>
     fetch(`/api/docs/${docId}/highlights/${hid}`, send("PATCH", body)).then(json<Highlight>),
   removeHighlight: (docId: string, hid: string) => fetch(`/api/docs/${docId}/highlights/${hid}`, send("DELETE")).then(json<{ ok: true }>),
+  getHighlightLabels: () => fetch("/api/highlight-labels").then(json<Record<string, string>>),
+  saveHighlightLabels: (labels: Record<string, string>) => fetch("/api/highlight-labels", send("PUT", labels)).then(json<Record<string, string>>),
 
   listNotes: (o: ChatTarget) => fetch(`${chatBase(o)}/notes`).then(json<NoteInfo[]>),
   getNote: (o: ChatTarget, name: string) => fetch(noteUrl(o, name)).then(json<Note>),
@@ -238,7 +302,7 @@ export const api = {
   },
   getDraft: (o: ChatTarget, did: string) => fetch(`${chatBase(o)}/drafts/${did}`).then(json<Draft>),
   /** Write a draft into its note; `base`: the note version the diff was shown against. Throws NoteConflict if it changed. */
-  async acceptDraft(o: ChatTarget, did: string, body: { target?: string; base: string | null }) {
+  async acceptDraft(o: ChatTarget, did: string, body: { target?: string; base: string | null; content?: string }) {
     const res = await fetch(`${chatBase(o)}/drafts/${did}/accept`, send("POST", body));
     if (res.status === 409) {
       const b = await res.json().catch(() => ({}));
@@ -251,6 +315,52 @@ export const api = {
   discardDraft: (o: ChatTarget, did: string) => fetch(`${chatBase(o)}/drafts/${did}`, send("DELETE")).then(json<{ ok: true; removed: string[] }>),
   renameNote: (o: ChatTarget, name: string, to: string) => fetch(noteUrl(o, name), send("PATCH", { name: to })).then(json<NoteInfo>),
   removeNote: (o: ChatTarget, name: string) => fetch(noteUrl(o, name), send("DELETE")).then(json<{ ok: true }>),
+
+  listSketches: (t: ChatTarget, opts: { ensure?: boolean } = {}) =>
+    fetch(`${chatBase(t)}/sketches${opts.ensure ? "?ensure=1" : ""}`).then(json<SketchInfo[]>),
+  createSketch: (t: ChatTarget, body: { title?: string; paper?: PaperStyle } = {}) =>
+    fetch(`${chatBase(t)}/sketches`, send("POST", body)).then(json<Sketch>),
+  getSketch: (t: ChatTarget, sid: string) => fetch(`${chatBase(t)}/sketches/${sid}`).then(json<Sketch>),
+  applySketchOp: (t: ChatTarget, sid: string, op: SketchOp, clientId?: string) =>
+    fetch(`${chatBase(t)}/sketches/${sid}/ops`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(clientId ? { "x-ydust-client": clientId } : {}) },
+      body: JSON.stringify(op),
+    }).then(json<{ ok: true; op: SketchOp }>),
+  deleteSketch: (t: ChatTarget, sid: string) => fetch(`${chatBase(t)}/sketches/${sid}`, send("DELETE")).then(json<{ ok: true }>),
+  sketchesEventsUrl: (t: ChatTarget, clientId?: string) =>
+    `${chatBase(t)}/sketches-events${clientId ? `?clientId=${encodeURIComponent(clientId)}` : ""}`,
+
+  padStatus: () => fetch("/api/pad").then(json<PadPairingStatus>),
+  startPad: (body: { kind: "doc" | "folder"; chatId: string; sketchId: string; host?: string }) =>
+    fetch("/api/pad/start", send("POST", body)).then(json<PadPairingStatus>),
+  stopPad: () => fetch("/api/pad/stop", send("POST")).then(json<PadPairingStatus>),
+
+  latexStatus: () => fetch("/api/latex/status").then(json<LatexStatus>),
+  convertLatex: (
+    body: { provider?: string; model?: string; effort?: string; language?: string; title?: string; images: string[] },
+    signal?: AbortSignal,
+  ) => fetch("/api/latex/convert", { ...send("POST", body), signal }).then(json<{ tex: string }>),
+  fixLatex: (body: { provider?: string; model?: string; effort?: string; tex: string; errorLog: string }, signal?: AbortSignal) =>
+    fetch("/api/latex/convert", { ...send("POST", body), signal }).then(json<{ tex: string }>),
+  async compileLatexPdf(tex: string, filename?: string): Promise<Blob> {
+    const res = await fetch("/api/latex/compile", send("POST", { tex, filename }));
+    if (!res.ok) {
+      const b = await res.json().catch(() => null);
+      if (res.status === 422 && b) throw new LatexCompileError(b.error ?? "LaTeX compilation failed.", b.log ?? "");
+      throw new Error(b?.error ?? `${res.status} ${res.statusText}`);
+    }
+    return res.blob();
+  },
+  async importLatexPdf(tex: string, filename: string, folderId: string | null): Promise<DocSummary> {
+    const res = await fetch("/api/latex/compile", send("POST", { tex, filename, importTo: { folderId } }));
+    if (!res.ok) {
+      const b = await res.json().catch(() => null);
+      if (res.status === 422 && b) throw new LatexCompileError(b.error ?? "LaTeX compilation failed.", b.log ?? "");
+      throw new Error(b?.error ?? `${res.status} ${res.statusText}`);
+    }
+    return res.json() as Promise<DocSummary>;
+  },
 };
 
 export type AskHandlers = {

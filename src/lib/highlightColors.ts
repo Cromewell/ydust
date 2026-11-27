@@ -14,5 +14,11 @@ export const HL_STYLE: Record<HlColor, { bar: string; strong: string; dot: strin
   orange: { bar: "#fed7aa", strong: "#fb923c", dot: "#fb923c", label: "Orange" },
 };
 
+/** User-defined names per highlight colour (e.g. { green: "Definition", pink: "Exam" }). */
+export type HighlightLabels = Partial<Record<HlColor, string>>;
+
 /** The bar colour for the current page colours. */
 export const barColor = (c: HlColor, opts: { dark: boolean; tinted: boolean }) => (opts.dark || opts.tinted ? HL_STYLE[c].strong : HL_STYLE[c].bar);
+
+/** Label shown for a highlight colour: custom name if set, else the colour's name. */
+export const hlLabel = (c: HlColor, labels?: HighlightLabels) => labels?.[c]?.trim() || HL_STYLE[c].label;

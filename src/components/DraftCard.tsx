@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { Check, ChevronsUpDown, Eye, FileDiff, FilePlus2, History, Loader2, NotebookPen, Pencil, Send, Trash2, TriangleAlert, X } from "lucide-react";
+import { Check, ChevronsUpDown, Eye, FileDiff, FilePlus2, History, Loader2, NotebookPen, Pencil, RotateCcw, Send, Trash2, TriangleAlert, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, NoteConflict, type ChatTarget, type Draft, type MessageDraft } from "../lib/api";
 import { diffRows, diffStats, type Line, type Row } from "../lib/diffRows";
@@ -59,7 +59,8 @@ function OpenDraft({ chat, d, busy, onJump, hasDoc, textSize, onDecided, onReque
   const [gone, setGone] = useState(false);
   const [target, setTarget] = useState(d.target);
   const [current, setCurrent] = useState<{ content: string; version: string } | null>(null);
-  const [view, setView] = useState<"diff" | "preview">("diff");
+  const [view, setView] = useState<"diff" | "preview" | "edit">("diff");
+  const [edited, setEdited] = useState<string | null>(null);
   const [changed, setChanged] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
@@ -94,7 +95,8 @@ function OpenDraft({ chat, d, busy, onJump, hasDoc, textSize, onDecided, onReque
   };
 
   const mode = d.mode;
-  const content = draft?.content ?? "";
+  const content = edited ?? draft?.content ?? "";
+  const isEdited = edited !== null && draft !== null && edited !== draft.content;
   const after = mode === "append" ? appendBlock(current?.content ?? "", content) : content;
   const rows = useMemo(() => (draft ? diffRows(mode === "create" ? "" : (current?.content ?? ""), after) : []), [draft, current, after, mode]);
   const stats = diffStats(rows);
@@ -105,7 +107,11 @@ function OpenDraft({ chat, d, busy, onJump, hasDoc, textSize, onDecided, onReque
     setWorking(true);
     setError(null);
     try {
-      const r = await api.acceptDraft(chat, d.id, { target: target !== d.target ? target : undefined, base: current?.version ?? null });
+      const r = await api.acceptDraft(chat, d.id, {
+        target: target !== d.target ? target : undefined,
+        base: current?.version ?? null,
+        content: isEdited ? content : undefined,
+      });
       onDecided(d, { accepted: r.target, removed: r.removed });
     } catch (err) {
       if (err instanceof NoteConflict) {
@@ -202,19 +208,21 @@ function OpenDraft({ chat, d, busy, onJump, hasDoc, textSize, onDecided, onReque
             </span>
           )}
           <span className="flex rounded-md bg-zinc-200/60 p-0.5 dark:bg-zinc-800" role="radiogroup" aria-label="Show">
-            {(["diff", "preview"] as const).map((v) => (
+            {(["diff", "preview", "edit"] as const).map((v) => (
               <button
                 key={v}
+                type="button"
                 role="radio"
                 aria-checked={view === v}
+                disabled={v === "edit" && (!draft || busy || working)}
                 onClick={() => setView(v)}
                 className={clsx(
-                  "flex items-center gap-1 rounded px-1.5 py-0.5 font-medium transition",
+                  "flex items-center gap-1 rounded px-1.5 py-0.5 font-medium transition disabled:opacity-40",
                   view === v ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100" : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200",
                 )}
               >
-                {v === "diff" ? <FileDiff className="size-3" /> : <Eye className="size-3" />}
-                {v === "diff" ? "Diff" : "Preview"}
+                {v === "diff" ? <FileDiff className="size-3" /> : v === "preview" ? <Eye className="size-3" /> : <Pencil className="size-3" />}
+                {v === "diff" ? "Diff" : v === "preview" ? "Preview" : "Edit"}
               </button>
             ))}
           </span>
@@ -231,6 +239,29 @@ function OpenDraft({ chat, d, busy, onJump, hasDoc, textSize, onDecided, onReque
       <div className="max-h-96 overflow-auto">
         {!draft ? (
           <Loader2 className="mx-auto my-4 size-4 animate-spin text-zinc-400" />
+        ) : view === "edit" ? (
+          <div className="flex flex-col">
+            <textarea
+              value={content}
+              onChange={(e) => setEdited(e.target.value)}
+              rows={12}
+              spellCheck
+              aria-label={`Edit draft for ${target}`}
+              className="w-full resize-y bg-white p-3 font-mono text-xs leading-relaxed text-zinc-800 outline-none dark:bg-zinc-950 dark:text-zinc-200"
+            />
+            {isEdited && (
+              <div className="flex items-center justify-between border-t border-zinc-100 bg-zinc-50 px-3 py-1 text-[11px] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900">
+                <span>Edited locally — Accept saves your version</span>
+                <button
+                  type="button"
+                  onClick={() => setEdited(null)}
+                  className="flex items-center gap-1 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                >
+                  <RotateCcw className="size-3" /> Reset edits
+                </button>
+              </div>
+            )}
+          </div>
         ) : view === "diff" ? (
           <DiffView rows={rows} />
         ) : (
@@ -305,11 +336,11 @@ function OpenDraft({ chat, d, busy, onJump, hasDoc, textSize, onDecided, onReque
         <footer className="flex flex-wrap items-center gap-1.5 border-t border-zinc-200 px-2 py-2 dark:border-zinc-800">
           <button
             onClick={() => void accept()}
-            disabled={!draft || busy || working || exists || missing}
+            disabled={!draft || !content.trim() || busy || working || exists || missing}
             className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:opacity-40"
           >
             {working ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
-            Accept
+            {isEdited ? "Accept edits" : "Accept"}
           </button>
           <button
             onClick={() => setAsking(true)}

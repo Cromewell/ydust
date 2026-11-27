@@ -66,6 +66,7 @@ describe("access middleware", () => {
     expect(res.headers.get("x-frame-options")).toBe("DENY");
     expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
   });
 
   it("blocks cross-site requests by sec-fetch-site", async () => {
@@ -93,8 +94,12 @@ describe("sign-in (YDUST_AUTH)", () => {
     try {
       expect((await get("/api/docs", { host: LOCAL })).status).toBe(401);
       expect((await get(`/api/auth?token=${"b".repeat(64)}`, { host: LOCAL })).status).toBe(403);
+      // Multibyte characters with the same string length have a different byte length: must be 403/401, not 500.
+      expect((await get(`/api/auth?token=${encodeURIComponent("ä".repeat(64))}`, { host: LOCAL })).status).toBe(403);
+      expect((await get("/api/docs", { host: LOCAL, cookie: `${AUTH_COOKIE}=${"ä".repeat(64)}` })).status).toBe(401);
       const signIn = await get(`/api/auth?token=${token}`, { host: LOCAL });
       expect(signIn.status).toBe(302);
+      expect(signIn.headers.get("cache-control")).toBe("no-store");
       const cookie = signIn.headers.get("set-cookie")!;
       expect(cookie).toContain(`${AUTH_COOKIE}=${token}`);
       expect(cookie).toMatch(/HttpOnly/i);
@@ -153,5 +158,39 @@ describe("routes without a CLI", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "unknown assistant" });
+  });
+
+  it("answers 400 for malformed JSON bodies instead of 500", async () => {
+    const bad = { method: "POST", headers: { host: LOCAL, "content-type": "application/json" }, body: "{not json" };
+    expect((await app.request("/api/folders", bad)).status).toBe(400);
+    const f = await (await app.request("/api/folders", { method: "POST", headers: { host: LOCAL, "content-type": "application/json" }, body: "{}" })).json();
+    expect((await app.request(`/api/folders/${f.id}`, { ...bad, method: "PATCH" })).status).toBe(400);
+    expect((await app.request(`/api/folders/${f.id}/notes/a.md`, { ...bad, method: "PUT" })).status).toBe(400);
+    // Valid JSON that isn't an object: rejected the same way, not a TypeError (500).
+    const nul = { ...bad, body: "null" };
+    expect((await app.request(`/api/folders/${f.id}`, { ...nul, method: "PATCH" })).status).toBe(400);
+    expect((await app.request("/api/internal/drafts", nul)).status).toBe(403);
+    expect((await app.request("/api/internal/approvals", nul)).status).toBe(403);
+  });
+
+  it("reorders documents inside a folder and rejects mismatched docIds", async () => {
+    const json = { host: LOCAL, "content-type": "application/json" };
+    const f = await (await app.request("/api/folders", { method: "POST", headers: json, body: JSON.stringify({ name: "Order" }) })).json();
+    const upload = async (name: string) => {
+      const form = new FormData();
+      form.append("file", new File(["%PDF-1.7\n"], name, { type: "application/pdf" }));
+      form.append("folderId", f.id);
+      return (await app.request("/api/docs", { method: "POST", headers: { host: LOCAL }, body: form })).json();
+    };
+    const a = await upload("a.pdf");
+    const b = await upload("b.pdf");
+    const c = await upload("c.pdf");
+    const ok = await app.request(`/api/folders/${f.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ docIds: [c.id, a.id, b.id] }) });
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).docIds).toEqual([c.id, a.id, b.id]);
+    // Rejects missing, duplicate or foreign ids.
+    expect((await app.request(`/api/folders/${f.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ docIds: [a.id, b.id] }) })).status).toBe(400);
+    expect((await app.request(`/api/folders/${f.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ docIds: [a.id, a.id, b.id] }) })).status).toBe(400);
+    expect((await app.request(`/api/folders/${f.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ docIds: [a.id, b.id, randomUUID()] }) })).status).toBe(400);
   });
 });

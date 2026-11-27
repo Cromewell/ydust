@@ -258,6 +258,14 @@ describe("write_note → draft → review", () => {
     expect(await readFile(path.join(notesDir("folder", f), "Overview.md"), "utf8")).toBe("# Course");
     expect(versionOf("# Course")).toHaveLength(16);
   });
+
+  it("allows editing draft content before accepting", async () => {
+    script = async (mcp) => (await mcp.call("write_note", { name: "Edited.md", mode: "create", content: "# Draft\n\nOriginal", summary: "s" }), "ok");
+    const d = (await ask(askUrl, { question: "make draft" })).find((e) => e.event === "draft")!.data;
+    expect((await req("POST", `/api/docs/${doc}/drafts/${d.id}/accept`, { content: "   " })).status).toBe(400);
+    expect((await req("POST", `/api/docs/${doc}/drafts/${d.id}/accept`, { content: "# Draft\n\nTweaked by me" })).status).toBe(200);
+    expect(await readFile(path.join(notesDir("doc", doc), "Edited.md"), "utf8")).toBe("# Draft\n\nTweaked by me");
+  });
 });
 
 describe("the internal route", () => {

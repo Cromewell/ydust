@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { Moon, RotateCcw, Sun, SunMoon } from "lucide-react";
+import { Monitor, Moon, RotateCcw, Sun, SunMoon } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 import {
   DEFAULT_APPEARANCE,
@@ -10,12 +10,23 @@ import {
   isDefaultAppearance,
   pageFilter,
   tintColor,
+  type AppTheme,
   type PdfAppearance,
 } from "../lib/appearance";
 import { useDismiss } from "../lib/settings";
 
-/** Page colours: original or dark, warmth (Kelvin), brightness / background. */
-export function AppearanceMenu({ value, onChange }: { value: PdfAppearance; onChange: (a: PdfAppearance) => void }) {
+/** App theme (system / light / dark) + page colours (original or dark, warmth, brightness). */
+export function AppearanceMenu({
+  value,
+  onChange,
+  theme,
+  onTheme,
+}: {
+  value: PdfAppearance;
+  onChange: (a: PdfAppearance) => void;
+  theme: AppTheme;
+  onTheme: (t: AppTheme) => void;
+}) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   useDismiss(open, useCallback(() => setOpen(false), []), root);
@@ -33,14 +44,43 @@ export function AppearanceMenu({ value, onChange }: { value: PdfAppearance; onCh
         className={clsx(
           "icon-btn",
           open && "bg-zinc-100 dark:bg-zinc-800",
-          custom && "text-orange-500 dark:text-orange-400",
+          (custom || theme !== "system") && "text-orange-500 dark:text-orange-400",
         )}
-        title="Page colours: dark mode, warmth, brightness"
+        title="Appearance: app theme & page colours"
       >
         <SunMoon className="size-4" />
       </button>
       {open && (
         <div className="animate-pop absolute top-full right-0 z-40 mt-1 w-72 rounded-xl border border-zinc-200 bg-white p-3 shadow-xl shadow-zinc-900/10 dark:border-zinc-700 dark:bg-zinc-900">
+          <div className="mb-3 border-b border-zinc-200 pb-3 dark:border-zinc-800">
+            <p className="mb-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300">App theme</p>
+            <div className="grid grid-cols-3 gap-1 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800" role="radiogroup" aria-label="App theme">
+              {(
+                [
+                  ["system", Monitor, "System"],
+                  ["light", Sun, "Light"],
+                  ["dark", Moon, "Dark"],
+                ] as const
+              ).map(([t, Icon, label]) => (
+                <button
+                  key={t}
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === t}
+                  onClick={() => onTheme(t)}
+                  className={clsx(
+                    "flex items-center justify-center gap-1 rounded-md py-1 text-xs font-medium transition",
+                    theme === t
+                      ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-950 dark:text-zinc-100"
+                      : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200",
+                  )}
+                >
+                  <Icon className="size-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="mb-3 flex items-center gap-3">
             {/* Preview: the same layers as a page. */}
             <div className="relative isolate h-14 w-12 shrink-0 overflow-hidden rounded border border-zinc-200 shadow-sm dark:border-zinc-700">
